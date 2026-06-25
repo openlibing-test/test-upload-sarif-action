@@ -1,0 +1,18 @@
+{
+  "name": "openlibing-upload-sarif",
+  "version": "1.0.0",
+  "description": "Upload SARIF file to OpenLibing",
+  "main": "index.js",
+  "scripts": {
+    "package": "ncc build index.js -o dist",
+    "zip": "node zip.js",
+    "build": "npm run package && npm run zip"
+  },
+  "author": "test-devops",
+  "license": "ISC",
+  "dependencies": {},
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.1",
+    "adm-zip": "^0.5.16"
+  }
+}
