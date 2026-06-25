@@ -111,13 +111,12 @@ function execCapture(cmd) {
 
 async function run() {
   const sarifFile = getInput('sarif_file');
-  const scanResultJson = getInput('scan_result_json');
-  const obsKeyRoot = getInput('obs_key_root') || 'codeql-results';
+  const obsKeyRoot = 'codeql-results';
 
   const obsBucket = 'openlibing-codeql';
   const obsAk = getInput('obs_ak');
   const obsSk = getInput('obs_sk');
-  
+
   const obsWriteEndpoint = 'obs.cn-southwest-2.myhuaweicloud.com';
   const obsReadEndpoint = 'https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com';
 
@@ -204,31 +203,6 @@ async function run() {
     ]
   };
 
-  if (scanResultJson) {
-    try {
-      const scanData = JSON.parse(scanResultJson);
-      if (scanData && typeof scanData === 'object') {
-        buildResult = {
-          type: 'build',
-          buildings: [
-            {
-              name: sarifFileName,
-              type: 'CodeQL代码检查结果（sarif）',
-              downloadUrl: sarifDownloadUrl
-            },
-            ...((scanData.buildings || []).map(b => ({
-              name: b.name || '',
-              type: b.type || '',
-              downloadUrl: b.downloadUrl || ''
-            })))
-          ]
-        };
-      }
-    } catch (e) {
-      console.log(`[WARN] scan_result_json 解析失败，使用默认构建产物: ${e.message}`);
-    }
-  }
-
   const buildResultDir = path.join(tmpDir, 'codeql-analyze-output');
   if (!fs.existsSync(buildResultDir)) {
     fs.mkdirSync(buildResultDir, { recursive: true });
@@ -279,7 +253,12 @@ async function run() {
     obsUrl: sarifDownloadUrl
   };
 
-  console.log(`[INFO] 回调地址: ${callbackUrl}`);
+  const apigAuthSummary = {
+    hasAppKey: !!apigAppKey,
+    hasAppSecret: !!apigAppSecret,
+    hasAppCode: !!apigAppCode
+  };
+  console.log(`[INFO] APIG 鉴权: ${JSON.stringify(apigAuthSummary)}`);
   console.log(`[INFO] 回调 payload: ${JSON.stringify(callbackPayload, null, 2)}`);
 
   try {
