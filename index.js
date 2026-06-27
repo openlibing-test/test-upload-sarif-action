@@ -111,12 +111,12 @@ function execCapture(cmd) {
 
 async function run() {
   const sarifFile = getInput('sarif_file');
-  const obsKeyRoot = 'codeql-results';
+  const obsKeyRoot = getInput('obs_key_root') || 'codeql-results';
 
   const obsBucket = 'openlibing-codeql';
   const obsAk = getInput('obs_ak');
   const obsSk = getInput('obs_sk');
-
+  
   const obsWriteEndpoint = 'obs.cn-southwest-2.myhuaweicloud.com';
   const obsReadEndpoint = 'https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com';
 
@@ -163,11 +163,32 @@ async function run() {
     }
   }
   if (!fs.existsSync(resolvedSarifPath)) {
-    console.log(`[ERROR] SARIF 文件不存在: ${sarifFile}`);
+    console.log(`[ERROR] SARIF 路径不存在: ${sarifFile}`);
     setOutput('result', 'failed');
     process.exit(1);
   }
-  console.log(`[OK] SARIF 文件: ${resolvedSarifPath}`);
+
+  let sarifFiles = [];
+  const isDir = fs.statSync(resolvedSarifPath).isDirectory();
+  if (isDir) {
+    console.log(`[INFO] 输入为目录: ${resolvedSarifPath}，扫描所有 .sarif 文件`);
+    const entries = fs.readdirSync(resolvedSarifPath);
+    for (const entry of entries) {
+      if (entry.endsWith('.sarif')) {
+        sarifFiles.push(path.join(resolvedSarifPath, entry));
+      }
+    }
+    if (sarifFiles.length === 0) {
+      console.log(`[ERROR] 目录中未找到 .sarif 文件: ${resolvedSarifPath}`);
+      setOutput('result', 'failed');
+      process.exit(1);
+    }
+    console.log(`[OK] 找到 ${sarifFiles.length} 个 SARIF 文件:`);
+    sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
+  } else {
+    sarifFiles = [resolvedSarifPath];
+    console.log(`[OK] SARIF 文件: ${resolvedSarifPath}`);
+  }
 
   console.log('\n===== [3] 安装 obsutil =====');
   const tmpDir = os.tmpdir();
@@ -188,30 +209,58 @@ async function run() {
   const downloadUrlPrefix = `${obsReadEndpoint}/${obsKeyPrefix}`;
   console.log(`OBS 路径前缀: ${obsKeyPrefix}`);
 
-  console.log('\n===== [5] 生成构建产物 JSON =====');
-  const sarifFileName = path.basename(resolvedSarifPath);
-  const sarifDownloadUrl = `${downloadUrlPrefix}/${sarifFileName}`;
-
-  let buildResult = {
-    type: 'build',
-    buildings: [
-      {
-        name: sarifFileName,
-        type: 'CodeQL代码检查结果（sarif）',
-        downloadUrl: sarifDownloadUrl
-      }
-    ]
-  };
-
+  console.log('\n===== [5] 打包 SARIF 文件 =====');
   const buildResultDir = path.join(tmpDir, 'codeql-analyze-output');
   if (!fs.existsSync(buildResultDir)) {
     fs.mkdirSync(buildResultDir, { recursive: true });
   }
+
+  let uploadFilePath = '';
+  let uploadFileName = '';
+  let sarifDownloadUrl = '';
+
+  if (sarifFiles.length === 1) {
+    uploadFilePath = sarifFiles[0];
+    uploadFileName = path.basename(uploadFilePath);
+    sarifDownloadUrl = `${downloadUrlPrefix}/${uploadFileName}`;
+    console.log(`[INFO] 单个 SARIF 文件，无需打包: ${uploadFileName}`);
+  } else {
+    const zipDir = path.join(buildResultDir, 'sarif-files');
+    if (!fs.existsSync(zipDir)) {
+      fs.mkdirSync(zipDir, { recursive: true });
+    }
+    for (const f of sarifFiles) {
+      const dest = path.join(zipDir, path.basename(f));
+      fs.copyFileSync(f, dest);
+    }
+    uploadFileName = 'codeql-results.zip';
+    const zipPath = path.join(buildResultDir, uploadFileName);
+    exec(`cd "${zipDir}" && zip -j "${zipPath}" *.sarif`);
+    uploadFilePath = zipPath;
+    sarifDownloadUrl = `${downloadUrlPrefix}/${uploadFileName}`;
+    console.log(`[OK] 已打包 ${sarifFiles.length} 个 SARIF 文件为 ${uploadFileName}`);
+  }
+
+  console.log('\n===== [6] 生成构建产物 JSON =====');
+  const sarifBuildings = sarifFiles.map(f => {
+    const name = path.basename(f);
+    return {
+      name: name,
+      type: 'CodeQL代码检查结果（sarif）',
+      downloadUrl: sarifDownloadUrl
+    };
+  });
+
+  let buildResult = {
+    type: 'build',
+    buildings: sarifBuildings
+  };
+
   const buildResultPath = path.join(buildResultDir, 'build-result.json');
   fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
   console.log(`[OK] 构建产物 JSON: ${buildResultPath}`);
 
-  console.log('\n===== [6] 上传到 OBS =====');
+  console.log('\n===== [7] 上传到 OBS =====');
 
   console.log(`[INFO] 上传构建产物目录: ${buildResultDir}`);
   try {
@@ -220,11 +269,11 @@ async function run() {
     console.log(`[WARN] 构建产物目录上传失败: ${e1.message}`);
   }
 
-  console.log(`[INFO] 上传 SARIF 文件: ${resolvedSarifPath}`);
+  console.log(`[INFO] 上传文件: ${uploadFileName}`);
   try {
-    exec(`${obsutilPath} cp "${resolvedSarifPath}" "obs://${obsBucket}/${obsKeyPrefix}/" -f -acl=public-read -e="${obsWriteEndpoint}" -i="${obsAk}" -k="${obsSk}"`);
+    exec(`${obsutilPath} cp "${uploadFilePath}" "obs://${obsBucket}/${obsKeyPrefix}/" -f -acl=public-read -e="${obsWriteEndpoint}" -i="${obsAk}" -k="${obsSk}"`);
   } catch (e2) {
-    console.log(`[ERROR] SARIF 文件上传失败: ${e2.message}`);
+    console.log(`[ERROR] ${uploadFileName} 上传失败: ${e2.message}`);
     console.log('[INFO] 检查 obsutil 错误详情:');
     try {
       exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
@@ -238,10 +287,10 @@ async function run() {
   console.log('\n================================================================');
   console.log('[INFO] 上传成功');
   console.log(`构建产物 JSON: ${buildResultUrl}`);
-  console.log(`SARIF 检查结果: ${sarifDownloadUrl}`);
+  console.log(`SARIF 下载地址: ${sarifDownloadUrl}`);
   console.log('================================================================');
 
-  console.log('\n===== [7] 回调通知 =====');
+  console.log('\n===== [8] 回调通知 =====');
 
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
