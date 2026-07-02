@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 
 function getInput(name) {
   const val = process.env[`INPUT_${name.toUpperCase()}`] || '';
@@ -49,7 +50,109 @@ function sanitizePath(pathStr) {
   return pathStr.replace(/(\d+\.\d+\.\d+\.\d+)/g, '[IP_ADDRESS]');
 }
 
-function sendCallback(url, payload, apigAppKey, apigAppSecret, apigAppCode) {
+function sha256Hex(data) {
+  return crypto.createHash('sha256').update(data, 'utf-8').digest('hex');
+}
+
+function hmacSha256Hex(key, data) {
+  return crypto.createHmac('sha256', key).update(data, 'utf-8').digest('hex');
+}
+
+function apigTwoChar(s) {
+  return s >= 10 ? '' + s : '0' + s;
+}
+
+function apigGetTime() {
+  const date = new Date();
+  return '' + date.getUTCFullYear() + apigTwoChar(date.getUTCMonth() + 1) + apigTwoChar(date.getUTCDate()) +
+    'T' + apigTwoChar(date.getUTCHours()) + apigTwoChar(date.getUTCMinutes()) + apigTwoChar(date.getUTCSeconds()) + 'Z';
+}
+
+function apigUrlEncode(str) {
+  return encodeURIComponent(String(str)).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+function apigFindHeader(headers, header) {
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === header.toLowerCase()) {
+      return headers[k];
+    }
+  }
+  return null;
+}
+
+function apigCanonicalURI(uri) {
+  const segments = uri.split('/');
+  const encoded = segments.map(s => apigUrlEncode(s)).join('/');
+  if (encoded.length === 0 || encoded[encoded.length - 1] !== '/') {
+    return encoded + '/';
+  }
+  return encoded;
+}
+
+function apigCanonicalQueryString(query) {
+  if (!query) return '';
+  const params = query.split('&').filter(Boolean);
+  const kvPairs = params.map(p => {
+    const idx = p.indexOf('=');
+    if (idx < 0) return { key: p, value: '' };
+    return { key: p.substring(0, idx), value: p.substring(idx + 1) };
+  });
+  kvPairs.sort((a, b) => a.key < b.key ? -1 : (a.key > b.key ? 1 : 0));
+  return kvPairs.map(kv => apigUrlEncode(kv.key) + '=' + apigUrlEncode(kv.value)).join('&');
+}
+
+function apigSignedHeaders(headers) {
+  return Object.keys(headers).map(k => k.toLowerCase()).sort();
+}
+
+function apigCanonicalHeaders(headers, signedHeaderKeys) {
+  const lower = {};
+  for (const k of Object.keys(headers)) {
+    lower[k.toLowerCase()] = headers[k];
+  }
+  return signedHeaderKeys.map(k => k + ':' + String(lower[k]).trim()).join('\n') + '\n';
+}
+
+function signApigRequest(method, url, headers, body, ak, sk) {
+  const urlObj = new URL(url);
+  const query = urlObj.search ? urlObj.search.substring(1) : '';
+
+  if (apigFindHeader(headers, 'host') === null) {
+    headers['host'] = urlObj.host;
+  }
+  if (apigFindHeader(headers, 'X-Sdk-Date') === null) {
+    headers['X-Sdk-Date'] = apigGetTime();
+  }
+  if (apigFindHeader(headers, 'x-sdk-content-sha256') === null) {
+    headers['x-sdk-content-sha256'] = sha256Hex(body || '');
+  }
+
+  const signedHeaderKeys = apigSignedHeaders(headers);
+  const signedHeaders = signedHeaderKeys.join(';');
+
+  const canonicalRequest = [
+    method.toUpperCase(),
+    apigCanonicalURI(urlObj.pathname || '/'),
+    apigCanonicalQueryString(query),
+    apigCanonicalHeaders(headers, signedHeaderKeys),
+    signedHeaders,
+    sha256Hex(body || '')
+  ].join('\n');
+
+  const stringToSign = [
+    'SDK-HMAC-SHA256',
+    apigFindHeader(headers, 'X-Sdk-Date'),
+    sha256Hex(canonicalRequest)
+  ].join('\n');
+
+  const signature = hmacSha256Hex(sk, stringToSign);
+
+  headers['Authorization'] = `SDK-HMAC-SHA256 Access=${ak}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  return headers;
+}
+
+function sendCallback(url, payload, apigAppKey, apigAppSecret) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
     const data = JSON.stringify(payload);
@@ -59,9 +162,9 @@ function sendCallback(url, payload, apigAppKey, apigAppSecret, apigAppCode) {
       'Content-Length': Buffer.byteLength(data, 'utf-8')
     };
 
-    if (apigAppKey) headers['Appkey'] = apigAppKey;
-    if (apigAppSecret) headers['AppSecret'] = apigAppSecret;
-    if (apigAppCode) headers['X-Apig-AppCode'] = apigAppCode;
+    if (apigAppKey && apigAppSecret) {
+      signApigRequest('POST', url, headers, data, apigAppKey, apigAppSecret);
+    }
 
     const options = {
       hostname: urlObj.hostname,
@@ -111,18 +214,17 @@ function execCapture(cmd) {
 
 async function run() {
   const sarifFile = getInput('sarif_file');
-  const obsKeyRoot = getInput('obs_key_root') || 'codeql-results';
+  const obsKeyRoot = 'codeql-results';
 
   const obsBucket = 'openlibing-codeql';
-  const obsAk = getInput('obs_ak');
-  const obsSk = getInput('obs_sk');
+  const obsAk = getInput('openlibing_obs_ak');
+  const obsSk = getInput('openlibing_obs_sk');
   
   const obsWriteEndpoint = 'obs.cn-southwest-2.myhuaweicloud.com';
   const obsReadEndpoint = 'https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com';
 
-  const apigAppKey = getInput('apig_app_key');
-  const apigAppSecret = getInput('apig_app_secret');
-  const apigAppCode = getInput('apig_app_code');
+  const apigAppKey = getInput('openlibing_apig_app_key');
+  const apigAppSecret = getInput('openlibing_apig_app_secret');
   const callbackUrl = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/openlibing-codecheck/codescan/v1/result/receive';
 
   const repoName = process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '';
@@ -304,16 +406,16 @@ async function run() {
 
   const apigAuthSummary = {
     hasAppKey: !!apigAppKey,
-    hasAppSecret: !!apigAppSecret,
-    hasAppCode: !!apigAppCode
+    hasAppSecret: !!apigAppSecret
   };
   console.log(`[INFO] APIG 鉴权: ${JSON.stringify(apigAuthSummary)}`);
   console.log(`[INFO] 回调 payload: ${JSON.stringify(callbackPayload, null, 2)}`);
 
   try {
-    const callbackResult = await sendCallback(callbackUrl, callbackPayload, apigAppKey, apigAppSecret, apigAppCode);
+    const callbackResult = await sendCallback(callbackUrl, callbackPayload, apigAppKey, apigAppSecret);
     console.log('[OK] 回调通知发送成功');
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
+    console.log(`查看上传结果解析: https://beta.openlibing.com/apps/codeCheck`);
   } catch (cbErr) {
     console.log(`[WARN] 回调通知发送失败: ${cbErr.message}`);
     console.log('[INFO] SARIF 上传已成功，回调失败不影响最终结果');
