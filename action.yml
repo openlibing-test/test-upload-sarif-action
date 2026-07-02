@@ -1,5 +1,5 @@
 name: 'openlibing-upload-sarif'
-version: 1.0.4
+version: 1.0.2
 author: 'test-devops'
 description: '将 CodeQL 扫描结果(SARIF)上传到 OBS 并生成构建产物 JSON'
 
@@ -16,31 +16,7 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: '请输入 SARIF 文件路径'
-  scan_result_json:
-    description: 'CodeQL 扫描结果 JSON（从 codeql-action 步骤输出获取）'
-    required: false
-    default: ''
-    layout:
-      type: 'input'
-      label: '扫描结果 JSON'
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ''
-  obs_key_root:
-    description: 'OBS 存储路径前缀'
-    required: false
-    default: 'codeql-results'
-    layout:
-      type: 'input'
-      label: 'OBS 路径前缀'
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ''
-  openlibing_obs_ak:
+  obs_ak:
     description: 'OBS Access Key ID'
     required: true
     default: ''
@@ -52,7 +28,7 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: '请输入 OBS AK'
-  openlibing_obs_sk:
+  obs_sk:
     description: 'OBS Secret Access Key'
     required: true
     default: ''
@@ -64,18 +40,6 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: '请输入 OBS SK'
-  scan_context:
-    description: '扫描上下文 JSON，包含 repo_url、pipeline_id、pipeline_name、pipeline_run_id、build_no、branch、commit_id'
-    required: false
-    default: ''
-    layout:
-      type: 'input'
-      label: '扫描上下文 JSON'
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ''
   apig_app_key:
     description: 'APIG 网关 AppKey（AK）'
     required: false
@@ -88,7 +52,7 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: ''
-  openlibing_apig_app_secret:
+  apig_app_secret:
     description: 'APIG 网关 AppSecret（SK）'
     required: false
     default: ''

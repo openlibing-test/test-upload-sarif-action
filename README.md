@@ -99,11 +99,10 @@ steps:
     uses: openlibing-upload-sarif
     with:
       sarif_file: ./codeql-results.sarif
-      obs_ak: ${{ secrets.OBS_AK }}
-      obs_sk: ${{ secrets.OBS_SK }}
-      apig_app_key: ${{ secrets.APIG_APP_KEY }}
-      apig_app_secret: ${{ secrets.APIG_APP_SECRET }}
-      apig_app_code: ${{ secrets.APIG_APP_CODE }}
+      obs_ak: ${{ secrets.OPENLIBING_OBS_AK }}
+      obs_sk: ${{ secrets.OPENLIBING_OBS_SK }}
+      apig_app_key: ${{ secrets.OPENLIBING_APIG_APP_KEY }}
+      apig_app_secret: ${{ secrets.OPENLIBING_APIG_APP_SECRET }}
 ```
 
 > APIG 鉴权为可选配置,若无需回调鉴权可省略 `apig_app_key` / `apig_app_secret` / `apig_app_code` 三个字段。

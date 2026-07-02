@@ -217,14 +217,14 @@ async function run() {
   const obsKeyRoot = 'codeql-results';
 
   const obsBucket = 'openlibing-codeql';
-  const obsAk = getInput('openlibing_obs_ak');
-  const obsSk = getInput('openlibing_obs_sk');
+  const obsAk = getInput('obs_ak');
+  const obsSk = getInput('obs_sk');
   
   const obsWriteEndpoint = 'obs.cn-southwest-2.myhuaweicloud.com';
   const obsReadEndpoint = 'https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com';
 
-  const apigAppKey = getInput('openlibing_apig_app_key');
-  const apigAppSecret = getInput('openlibing_apig_app_secret');
+  const apigAppKey = getInput('apig_app_key');
+  const apigAppSecret = getInput('apig_app_secret');
   const callbackUrl = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/openlibing-codecheck/codescan/v1/result/receive';
 
   const repoName = process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '';
