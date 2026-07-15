@@ -225,13 +225,23 @@ async function run() {
 
   const apigAppKey = getInput('apig_app_key');
   const apigAppSecret = getInput('apig_app_secret');
-  const callbackUrl = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/openlibing-codecheck/codescan/v1/result/receive';
+  const callbackUrl = 'https://apig.openlibing.com:443/openlibing-codecheck/codescan/v1/result/receive';
+  const callbackBetaUrl = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/openlibing-codecheck/codescan/v1/result/receive';
+
+  // 根据仓库 URL host 是否以 test. 开头判断使用 beta 还是正式环境回调地址
+  const repoUrlForEnv = process.env.ATOMGIT_REPOSITORY_URL || '';
+  const isBetaEnv = /^https?:\/\/test\./i.test(repoUrlForEnv);
+  const finalCallbackUrl = isBetaEnv ? callbackBetaUrl : callbackUrl;
+  console.log(`[INFO] 仓库 URL: ${repoUrlForEnv || '(空)'}`);
 
   const repoName = process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '';
   const repoBaseName = repoName.split('/').pop() || 'unknown-repo';
+  const workflowRunId = process.env.WORKFLOW_RUN_ID || '';
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
-  const buildNumber = `${repoBaseName}/${dateStr}`;
+  const buildNumber = workflowRunId
+    ? `${repoBaseName}/${dateStr}/${workflowRunId}`
+    : `${repoBaseName}/${dateStr}`;
 
   console.log('===== openlibing-upload-sarif 启动 =====');
 
@@ -309,60 +319,32 @@ async function run() {
   console.log('\n===== [4] 构建 OBS 路径 =====');
   const obsKeyPrefix = `${obsKeyRoot}/${buildNumber}`;
   const downloadUrlPrefix = `${obsReadEndpoint}/${obsKeyPrefix}`;
-  console.log(`OBS 路径前缀: ${obsKeyPrefix}`);
 
-  console.log('\n===== [5] 打包 SARIF 文件 =====');
+  console.log('\n===== [5] 生成构建产物 JSON =====');
   const buildResultDir = path.join(tmpDir, 'codeql-analyze-output');
   if (!fs.existsSync(buildResultDir)) {
     fs.mkdirSync(buildResultDir, { recursive: true });
   }
 
-  let uploadFilePath = '';
-  let uploadFileName = '';
-  let sarifDownloadUrl = '';
-
-  if (sarifFiles.length === 1) {
-    uploadFilePath = sarifFiles[0];
-    uploadFileName = path.basename(uploadFilePath);
-    sarifDownloadUrl = `${downloadUrlPrefix}/${uploadFileName}`;
-    console.log(`[INFO] 单个 SARIF 文件，无需打包: ${uploadFileName}`);
-  } else {
-    const zipDir = path.join(buildResultDir, 'sarif-files');
-    if (!fs.existsSync(zipDir)) {
-      fs.mkdirSync(zipDir, { recursive: true });
-    }
-    for (const f of sarifFiles) {
-      const dest = path.join(zipDir, path.basename(f));
-      fs.copyFileSync(f, dest);
-    }
-    uploadFileName = 'codeql-results.zip';
-    const zipPath = path.join(buildResultDir, uploadFileName);
-    exec(`cd "${zipDir}" && zip -j "${zipPath}" *.sarif`);
-    uploadFilePath = zipPath;
-    sarifDownloadUrl = `${downloadUrlPrefix}/${uploadFileName}`;
-    console.log(`[OK] 已打包 ${sarifFiles.length} 个 SARIF 文件为 ${uploadFileName}`);
-  }
-
-  console.log('\n===== [6] 生成构建产物 JSON =====');
-  const sarifBuildings = sarifFiles.map(f => {
-    const name = path.basename(f);
+  const sarifDownloadUrls = sarifFiles.map(f => `${downloadUrlPrefix}/${path.basename(f)}`);
+  const sarifBuildings = sarifFiles.map((f, i) => {
     return {
-      name: name,
+      name: path.basename(f),
       type: 'CodeQL代码检查结果（sarif）',
-      downloadUrl: sarifDownloadUrl
+      downloadUrl: sarifDownloadUrls[i]
     };
   });
 
+  const isSingleFile = sarifFiles.length === 1;
   let buildResult = {
     type: 'build',
-    buildings: sarifBuildings
+    buildings: isSingleFile ? sarifBuildings[0] : sarifBuildings
   };
 
   const buildResultPath = path.join(buildResultDir, 'build-result.json');
   fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
-  console.log(`[OK] 构建产物 JSON: ${buildResultPath}`);
 
-  console.log('\n===== [7] 上传到 OBS =====');
+  console.log('\n===== [6] 上传到 OBS =====');
 
   console.log(`[INFO] 上传构建产物目录: ${buildResultDir}`);
   try {
@@ -371,25 +353,28 @@ async function run() {
     console.log(`[WARN] 构建产物目录上传失败: ${e1.message}`);
   }
 
-  console.log(`[INFO] 上传文件: ${uploadFileName}`);
-  try {
-    exec(`${obsutilPath} cp "${uploadFilePath}" "obs://${obsBucket}/${obsKeyPrefix}/" -f -acl=public-read -e="${obsWriteEndpoint}" -i="${obsAk}" -k="${obsSk}"`);
-  } catch (e2) {
-    console.log(`[ERROR] ${uploadFileName} 上传失败: ${e2.message}`);
-    console.log('[INFO] 检查 obsutil 错误详情:');
+  for (let i = 0; i < sarifFiles.length; i++) {
+    const sarifFile = sarifFiles[i];
+    const sarifName = path.basename(sarifFile);
+    console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifFiles.length}): ${sarifName}`);
     try {
-      exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
-    } catch (_) {}
-    setOutput('result', 'failed');
-    process.exit(1);
+      exec(`${obsutilPath} cp "${sarifFile}" "obs://${obsBucket}/${obsKeyPrefix}/" -f -acl=public-read -e="${obsWriteEndpoint}" -i="${obsAk}" -k="${obsSk}"`);
+    } catch (e2) {
+      console.log(`[ERROR] ${sarifName} 上传失败: ${e2.message}`);
+      console.log('[INFO] 检查 obsutil 错误详情:');
+      try {
+        exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
+      } catch (_) {}
+      setOutput('result', 'failed');
+      process.exit(1);
+    }
   }
 
   const buildResultUrl = `${downloadUrlPrefix}/build-result.json`;
+  const obsUrlValue = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
 
   console.log('\n================================================================');
   console.log('[INFO] 上传成功');
-  console.log(`构建产物 JSON: ${buildResultUrl}`);
-  console.log(`SARIF 下载地址: ${sarifDownloadUrl}`);
   console.log('================================================================');
 
   console.log('\n===== [8] 回调通知 =====');
@@ -401,7 +386,7 @@ async function run() {
     pipelineRunId: process.env.ATOMGIT_PIPELINE_RUN_ID || process.env.PIPELINE_RUN_ID || '',
     branch: process.env.ATOMGIT_REF_NAME || '',
     commitId: process.env.ATOMGIT_SHA || '',
-    obsUrl: sarifDownloadUrl
+    obsUrl: obsUrlValue
   };
 
   const apigAuthSummary = {
@@ -409,21 +394,20 @@ async function run() {
     hasAppSecret: !!apigAppSecret
   };
   console.log(`[INFO] APIG 鉴权: ${JSON.stringify(apigAuthSummary)}`);
-  console.log(`[INFO] 回调 payload: ${JSON.stringify(callbackPayload, null, 2)}`);
 
   try {
-    const callbackResult = await sendCallback(callbackUrl, callbackPayload, apigAppKey, apigAppSecret);
-    console.log('[OK] 回调通知发送成功');
+    console.log(`[INFO] 回调地址: ${finalCallbackUrl}`);
+    const callbackResult = await sendCallback(finalCallbackUrl, callbackPayload, apigAppKey, apigAppSecret);
+    console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
-    console.log(`查看上传结果解析: https://beta.openlibing.com/apps/codeCheck`);
+    const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
+    console.log(`查看上传结果解析: ${resultViewUrl}`);
   } catch (cbErr) {
     console.log(`[WARN] 回调通知发送失败: ${cbErr.message}`);
     console.log('[INFO] SARIF 上传已成功，回调失败不影响最终结果');
   }
 
   setOutput('result', 'success');
-  setOutput('download_url', sarifDownloadUrl);
-  setOutput('build_result_url', buildResultUrl);
 }
 
 run().catch(err => {
