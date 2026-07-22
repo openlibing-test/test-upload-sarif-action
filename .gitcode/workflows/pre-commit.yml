@@ -1,0 +1,42 @@
+name: pre-commit
+
+on:
+  pull_request_target:
+    branches:
+      - '*'
+  pull_request_comment:
+    types: [created]
+    comments: ['pre-commit']
+    branches:
+      - '*'
+
+jobs:
+  pre-commit:
+    name:  pre-commit
+    runs-on:  ['codearts-hosted', 'ubuntu-latest', x64, 'large']
+    steps:
+      - name: Checkout repository
+        uses: checkout
+        with:
+          token: ${{ secrets.ROBOT_TOKEN }}
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }}
+
+      - name: setup-python
+        uses: setup-python
+        with:
+          version: 3.14
+
+      - name: setup-jdk
+        uses: setup-jdk
+        with:
+          jdk-version: 21
+          maven-version: '3.8.9'
+
+      - name: run pre-commit
+        uses: openlibing-pre-commit-action
+        with:
+          extra_args: ${{ inputs.extra_args }}
+          gc_token: ${{ secrets.ROBOT_TOKEN }}
+        env:
+          openlibing_mvn_repo_username: ${{ secrets.OPENLIBING_MVN_REPO_USERNAME }}
+          openlibing_mvn_repo_password: ${{ secrets.OPENLIBING_MVN_REPO_PASSWORD }}
