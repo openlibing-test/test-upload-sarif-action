@@ -28,7 +28,7 @@ jobs:
       - name: setup-node
         uses: setup-node
         with:
-          version: 20
+          node-version: 20
 
       - name: run pre-commit
         uses: openlibing-pre-commit-action
