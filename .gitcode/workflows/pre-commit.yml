@@ -25,16 +25,7 @@ jobs:
         with:
           version: 3.14
 
-      - name: setup-jdk
-        uses: setup-jdk
-        with:
-          jdk-version: 21
-          maven-version: '3.8.9'
-
       - name: run pre-commit
         uses: openlibing-pre-commit-action
         with:
           extra_args: ${{ inputs.extra_args }}
-        env:
-          openlibing_mvn_repo_username: ${{ secrets.OPENLIBING_MVN_REPO_USERNAME }}
-          openlibing_mvn_repo_password: ${{ secrets.OPENLIBING_MVN_REPO_PASSWORD }}
