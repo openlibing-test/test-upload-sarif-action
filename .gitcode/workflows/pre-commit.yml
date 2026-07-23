@@ -1,0 +1,36 @@
+name: pre-commit
+
+on:
+  pull_request_target:
+    branches:
+      - '*'
+  pull_request_comment:
+    types: [created]
+    comments: ['pre-commit']
+    branches:
+      - '*'
+
+jobs:
+  pre-commit:
+    name:  pre-commit
+    runs-on:  ['codearts-hosted', 'ubuntu-latest', x64, 'large']
+    steps:
+      - name: Checkout repository
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }}
+
+      - name: setup-python
+        uses: setup-python
+        with:
+          version: 3.14
+
+      - name: setup-node
+        uses: setup-node
+        with:
+          node-version: 20
+
+      - name: run pre-commit
+        uses: openlibing-pre-commit-action
+        with:
+          extra_args: ${{ inputs.extra_args }}
