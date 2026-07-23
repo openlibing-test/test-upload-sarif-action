@@ -36,7 +36,6 @@ jobs:
         uses: openlibing-pre-commit-action
         with:
           extra_args: ${{ inputs.extra_args }}
-          gc_token: ${{ secrets.ROBOT_TOKEN }}
         env:
           openlibing_mvn_repo_username: ${{ secrets.OPENLIBING_MVN_REPO_USERNAME }}
           openlibing_mvn_repo_password: ${{ secrets.OPENLIBING_MVN_REPO_PASSWORD }}
