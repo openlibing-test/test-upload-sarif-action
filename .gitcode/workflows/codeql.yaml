@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: checkout
         uses: checkout
-        with:
-          token: ${{ secrets.ROBOT_TOKEN }}
 
       - name: setup-node
         uses: setup-node
