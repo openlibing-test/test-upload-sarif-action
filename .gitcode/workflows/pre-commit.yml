@@ -30,6 +30,12 @@ jobs:
         with:
           node-version: 20
 
+      - name: setup-go
+        uses: setup-go
+        with:
+          version: 1.26
+          cache: true
+
       - name: run pre-commit
         uses: openlibing-pre-commit-action
         with:
