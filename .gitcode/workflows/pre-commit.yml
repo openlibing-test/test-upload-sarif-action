@@ -13,7 +13,7 @@ on:
 jobs:
   pre-commit:
     name:  pre-commit
-    runs-on:  ['codearts-hosted', 'ubuntu-latest', x64, 'large']
+    runs-on: ['codearts-hosted', 'ubuntu-latest', x64, 'small']
     steps:
       - name: Checkout repository
         uses: checkout
@@ -29,6 +29,12 @@ jobs:
         uses: setup-node
         with:
           node-version: 20
+
+      - name: setup-go
+        uses: setup-go
+        with:
+          version: 1.26
+          cache: true
 
       - name: run pre-commit
         uses: openlibing-pre-commit-action
