@@ -1,5 +1,5 @@
 name: 'openlibing-upload-sarif'
-version: 1.0.6
+version: 1.0.7
 author: 'test-devops'
 description: '将 CodeQL 扫描结果(SARIF)上传到 OBS 并生成构建产物 JSON'
 
@@ -64,14 +64,34 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: ''
+  category:
+    description: '检查结果分类（用户手动传入，不传则为空）'
+    required: false
+    default: ''
+    layout:
+      type: 'input'
+      label: '结果分类'
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ''
+  env_type:
+    description: '环境类型：prod（正式环境）/ beta（测试环境）。不传则默认 prod'
+    required: false
+    default: 'prod'
+    layout:
+      type: 'input'
+      label: '环境类型'
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ''
 
 outputs:
   result:
     description: '上传结果：success 或 failed'
-  download_url:
-    description: 'SARIF 文件下载地址'
-  build_result_url:
-    description: '构建产物 JSON 下载地址'
 
 runs:
   using: 'node16'

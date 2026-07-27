@@ -225,18 +225,20 @@ async function run() {
 
   const apigAppKey = getInput('apig_app_key');
   const apigAppSecret = getInput('apig_app_secret');
+  const category = getInput('category');
+  // workflow_run_id 由调用方在 step env 块中注入 workflow_run_id
+  const workflowRunId = process.env.workflow_run_id || '';
   const callbackUrl = 'https://apig.openlibing.com:443/openlibing-codecheck/codescan/v1/result/receive';
   const callbackBetaUrl = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/openlibing-codecheck/codescan/v1/result/receive';
 
-  // 根据仓库 URL host 是否以 test. 开头判断使用 beta 还是正式环境回调地址
-  const repoUrlForEnv = process.env.ATOMGIT_REPOSITORY_URL || '';
-  const isBetaEnv = /^https?:\/\/test\./i.test(repoUrlForEnv);
+  // 根据 env_type input 显式选择回调地址，不再通过仓库 URL 推断
+  const envType = (getInput('env_type') || 'prod').toLowerCase();
+  const isBetaEnv = envType === 'beta';
   const finalCallbackUrl = isBetaEnv ? callbackBetaUrl : callbackUrl;
-  console.log(`[INFO] 仓库 URL: ${repoUrlForEnv || '(空)'}`);
+  console.log(`[INFO] 环境类型: ${isBetaEnv ? 'beta (测试环境)' : 'prod (正式环境)'}`);
 
   const repoName = process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '';
   const repoBaseName = repoName.split('/').pop() || 'unknown-repo';
-  const workflowRunId = process.env.WORKFLOW_RUN_ID || '';
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
   const buildNumber = workflowRunId
@@ -379,14 +381,40 @@ async function run() {
 
   console.log('\n===== [8] 回调通知 =====');
 
+  // 计算 sourceRunUrl：直接采用拼接方式
+  // 路径格式：https://gitcode.com/{owner}/{repo}/actions/runs/{workflow_run_id}
+  let sourceRunUrl = '';
+  {
+    const repoUrlForRun = process.env.ATOMGIT_REPOSITORY_URL || '';
+    const workflowRunIdForUrl = workflowRunId || '';
+    if (repoUrlForRun && workflowRunIdForUrl) {
+      // 将仓库 URL 统一转为 https 形式：
+      //   git@host:owner/repo.git   → https://host/owner/repo
+      //   https://host/owner/repo.git → https://host/owner/repo
+      //   ssh://git@host:22/owner/repo.git → https://host/owner/repo
+      let httpsBase = repoUrlForRun.trim();
+      const sshStyleMatch = httpsBase.match(/^git@([^:]+):(.+)$/);
+      if (sshStyleMatch) {
+        httpsBase = `https://${sshStyleMatch[1]}/${sshStyleMatch[2]}`;
+      } else if (/^ssh:\/\//i.test(httpsBase)) {
+        httpsBase = httpsBase.replace(/^ssh:\/\/[^@/]+@?/i, 'https://');
+      }
+      httpsBase = httpsBase.replace(/\.git$/, '');
+      sourceRunUrl = `${httpsBase}/actions/runs/${workflowRunIdForUrl}`;
+    }
+  }
+
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
     pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
     pipelineName: process.env.PIPELINE_NAME || '',
-    pipelineRunId: process.env.ATOMGIT_PIPELINE_RUN_ID || process.env.PIPELINE_RUN_ID || '',
-    branch: process.env.ATOMGIT_REF_NAME || '',
+    pipelineRunId: workflowRunId || '',
+    branch: process.env.ATOMGIT_HEAD_REF || '',
     commitId: process.env.ATOMGIT_SHA || '',
-    obsUrl: obsUrlValue
+    obsUrl: obsUrlValue,
+    category: category || '',
+    source: 'GITCODE_ACTION',
+    sourceRunUrl: sourceRunUrl || ''
   };
 
   const apigAuthSummary = {
