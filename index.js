@@ -226,8 +226,8 @@ async function run() {
   const apigAppKey = getInput('apig_app_key');
   const apigAppSecret = getInput('apig_app_secret');
   const category = getInput('category');
-  // workflow_run_id 由调用方在 step env 块中注入 workflow_run_id
-  const workflowRunId = process.env.workflow_run_id || '';
+  // workflow_run_id 由 gitcode 平台自动注入到 env
+  const workflowRunId = process.env.ATOMGIT_RUN_ID || '';
   const callbackUrl = 'https://apig.openlibing.com:443/openlibing-codecheck/codescan/v1/result/receive';
   const callbackBetaUrl = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/openlibing-codecheck/codescan/v1/result/receive';
 
