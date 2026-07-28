@@ -1,42 +1,79 @@
 name: pre-commit
 
 on:
-  pull_request_target:
+  workflow_dispatch:
+  pull_request_target: # 使用 pull_request_target 确保 PR 流水线始终读取默认分支（master）的最新配置文件
     branches:
-      - '*'
-  pull_request_comment:
+      - "*"
+  pull_request_comment: # PR 评论事件：当用户在 PR 中发表评论时触发
     types: [created]
-    comments: ['pre-commit']
+    comments: ["/pre-commit"]
     branches:
-      - '*'
+      - "*"
 
-jobs:
+permissions:
+  repository: read
+  pr: write
+
+stages:
+  initiate:
+    name: initiate
+    jobs:
+      pr-label-running:
+        name: pr-label-running
+        runs-on: ["ubuntu-latest", "x64", "small"]
+        steps:
+          - name: pr-label-running
+            uses: ozvale/pr-label-action@main
+            with:
+              token: ${{ secrets.ROBOT_TOKEN }}
+              add_labels: ci-pipeline-running
+              remove_labels: ci-pipeline-passed,ci-pipeline-failed
+
   pre-commit:
-    name:  pre-commit
-    runs-on: ['codearts-hosted', 'ubuntu-latest', x64, 'small']
-    steps:
-      - name: Checkout repository
-        uses: checkout
-        with:
-          ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }}
+    name: pre-commit
+    jobs:
+      pre-commit:
+        name: pre-commit
+        runs-on: ["self-hosted", "region=overseas"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
 
-      - name: setup-python
-        uses: setup-python
-        with:
-          version: 3.14
+          - name: setup-node
+            uses: setup-node
+            with:
+              node-version: 20
+              cache: true
 
-      - name: setup-node
-        uses: setup-node
-        with:
-          node-version: 20
+          - name: setup-prettier
+            run: |
+              npm install --save-dev --save-exact prettier@3.9.5
+              echo 'npx version:' && npx -v
+              echo 'prettier version:' && npx prettier --version
 
-      - name: setup-go
-        uses: setup-go
-        with:
-          version: 1.26
-          cache: true
+          - name: setup-go
+            uses: setup-go
+            with:
+              version: 1.26
+              cache: true
 
-      - name: run pre-commit
-        uses: openlibing-pre-commit-action
-        with:
-          extra_args: ${{ inputs.extra_args }}
+          - name: pre-commit
+            uses: openlibing-pre-commit-action
+            with:
+              extra_args: ${{ inputs.extra_args }}
+
+post:
+  jobs:
+    label-pr:
+      name: pr-label-complete
+      runs-on: ["ubuntu-latest", "x64", "slim"]
+      steps:
+        - name: set pr label complete
+          uses: ozvale/pr-label-action@main
+          with:
+            token: ${{ secrets.ROBOT_TOKEN }}
+            add_labels: ${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-passed' || 'ci-pipeline-failed' }}
+            remove_labels: ci-pipeline-running
