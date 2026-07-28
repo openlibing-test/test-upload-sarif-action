@@ -9,8 +9,8 @@ on:
 jobs:
   codeql:
     name: codeql
-    runs-on: [ "codearts-hosted", "ubuntu-latest", "x64", "large" ]
-    needs: [ ]
+    runs-on: ["codearts-hosted", "ubuntu-latest", "x64", "large"]
+    needs: []
     steps:
       - name: checkout
         uses: checkout
