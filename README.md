@@ -24,7 +24,7 @@
 | obs_sk | OBS Secret Access Key | 是 | - |
 | apig_app_key | APIG 网关 AppKey(HMAC-SHA256 签名,与 AppSecret 配合使用) | 否 | - |
 | apig_app_secret | APIG 网关 AppSecret(HMAC-SHA256 签名,与 AppKey 配合使用) | 否 | - |
-| category | 检查结果分类(用户手动传入,不传则为空) | 否 | - |
+| category | 检查结果分类(用户手动传入,不传则默认为 `default`) | 否 | `default` |
 
 ## 输出参数
 
@@ -64,7 +64,7 @@ OBS 桶: `openlibing-codeql`
 | branch | `ATOMGIT_HEAD_REF` |
 | commitId | `ATOMGIT_SHA` |
 | obsUrl | SARIF 文件下载地址(单文件为字符串,多文件为数组) |
-| category | 用户传入的 `category`,默认为空 |
+| category | 用户传入的 `category`,不传则默认为 `default` |
 | source | 固定值 `GITCODE_ACTION` |
 | sourceRunUrl | 根据仓库 URL 和 `workflow_run_id` 拼接的 GitCode 运行链接 |
 

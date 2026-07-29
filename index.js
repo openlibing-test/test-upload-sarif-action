@@ -404,18 +404,26 @@ async function run() {
     }
   }
 
+  // PR/MR 事件时用 base 分支（目标分支），其他事件用当前 ref
+  const eventName = (process.env.ATOMGIT_EVENT_NAME || '').toLowerCase();
+  const isPrEvent = eventName === 'mr'
+  const branch = isPrEvent
+    ? (process.env.ATOMGIT_HEAD_REF || '')
+    : (process.env.ATOMGIT_REF_NAME || '');
+
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
     pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
     pipelineName: process.env.PIPELINE_NAME || '',
     pipelineRunId: workflowRunId || '',
-    branch: process.env.ATOMGIT_HEAD_REF || '',
+    branch: branch,
     commitId: process.env.ATOMGIT_SHA || '',
     obsUrl: obsUrlValue,
     category: category || '',
     source: 'GITCODE_ACTION',
     sourceRunUrl: sourceRunUrl || ''
   };
+  console.log(`[INFO] 回调通知 payload: ${JSON.stringify(callbackPayload)}`);
 
   const apigAuthSummary = {
     hasAppKey: !!apigAppKey,
