@@ -423,7 +423,6 @@ async function run() {
     source: 'GITCODE_ACTION',
     sourceRunUrl: sourceRunUrl || ''
   };
-  console.log(`[INFO] 回调通知 payload: ${JSON.stringify(callbackPayload)}`);
 
   const apigAuthSummary = {
     hasAppKey: !!apigAppKey,

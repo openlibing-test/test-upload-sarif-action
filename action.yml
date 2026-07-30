@@ -1,5 +1,5 @@
 name: 'openlibing-upload-sarif'
-version: 1.0.9
+version: 1.0.10
 author: 'test-devops'
 description: '将 CodeQL 扫描结果(SARIF)上传到 OBS 并生成构建产物 JSON'
 
