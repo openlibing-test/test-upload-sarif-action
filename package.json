@@ -1,7 +1,7 @@
 {
   "name": "openlibing-upload-sarif",
-  "version": "1.0.0",
-  "description": "Upload SARIF file to OpenLibing",
+  "version": "1.1.0",
+  "description": "将任意工具产出的 SARIF 扫描结果上传到 OpenLibing（OIDC 认证）",
   "main": "index.js",
   "scripts": {
     "package": "ncc build index.js -o dist",
@@ -10,7 +10,9 @@
   },
   "author": "test-devops",
   "license": "ISC",
-  "dependencies": {},
+  "dependencies": {
+    "@openlibing/huaweicloud-oidc-client": "0.0.5"
+  },
   "devDependencies": {
     "@vercel/ncc": "^0.38.1",
     "adm-zip": "^0.5.16"

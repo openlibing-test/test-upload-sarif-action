@@ -2,56 +2,74 @@
 
 ## 简介
 
-将 CodeQL 扫描结果(SARIF 文件)上传到华为云 OBS 对象存储,并生成标准化的构建产物 JSON,同时通过 APIG 网关回调通知 OpenLibing 服务。
+通用 SARIF 上传插件：将任意静态扫描工具产出的 SARIF 文件（支持单文件或目录）上传到华为云 OBS 对象存储，生成标准化的构建产物 JSON，并通过 APIG 网关回调通知 OpenLibing 服务。
 
 - **插件名**: `openlibing-upload-sarif`
+- **认证模式**: OIDC 联邦认证（免静态 AK/SK），凭证由 `huaweicloud-oidc-auth` 插件注入
 
 ## 功能特性
 
-- 自动检查并定位 SARIF 文件路径(支持 workspace 和 Git 目录自动发现)
-- 自动下载安装 `obsutil` 命令行工具
-- 上传 SARIF 文件到 OBS 桶 `openlibing-codeql`,设置公共读权限
-- 根据 SARIF 文件生成构建产物 `build-result.json`
-- 通过 APIG 网关回调通知 OpenLibing 扫描服务
-- 支持 APIG HMAC-SHA256 签名鉴权(AppKey/AppSecret)
+- 通用 SARIF 上传：不绑定任何具体扫描工具，支持单文件或目录（自动扫描目录下所有 `.sarif` 文件）
+- 自动识别 SARIF 文件中的工具名（`runs[0].tool.driver.name`）用于构建产物类型，后端按 `tool.driver.name` 路由
+- OIDC 免静态凭证：OBS 上传与 APIG 回调均使用 `huaweicloud-oidc-auth` 插件注入的临时凭证
+- 自动下载安装 `obsutil` 命令行工具，上传对象设置公共读权限
+- 通过 APIG 网关回调通知 OpenLibing 扫描服务（V11-HMAC-SHA256 签名 + `X-Security-Token`）
+
+## 前置要求
+
+Workflow 必须声明 `permissions: id-token: write`，并在本插件之前运行 `huaweicloud-oidc-auth` 插件换取临时凭证：
+
+```yaml
+permissions:
+  id-token: write
+
+steps:
+  - name: 获取华为云临时凭证（OIDC）
+    uses: huaweicloud-oidc-auth
+    with:
+      audience: huawei-cloud-service
+      agency_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:agency:gitcode-actions
+      provider_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:oidcProvider:GitCodeActions
+      region: cn-southwest-2
+      duration: 3600
+```
 
 ## 输入参数
 
 | 参数 | 说明 | 必填 | 默认值 |
 |------|------|------|--------|
-| sarif_file | SARIF 文件路径(相对路径或绝对路径),支持单个文件或目录(自动扫描目录下所有 `.sarif` 文件) | 是 | - |
-| obs_ak | OBS Access Key ID | 是 | - |
-| obs_sk | OBS Secret Access Key | 是 | - |
-| apig_app_key | APIG 网关 AppKey(HMAC-SHA256 签名,与 AppSecret 配合使用) | 否 | - |
-| apig_app_secret | APIG 网关 AppSecret(HMAC-SHA256 签名,与 AppKey 配合使用) | 否 | - |
-| category | 检查结果分类(用户手动传入,不传则默认为 `default`) | 否 | `default` |
+| sarif_file | SARIF 文件路径或所在目录（相对/绝对路径均可，目录自动扫描所有 `.sarif` 文件） | 是 | - |
+| category | 检查结果分类（用户手动传入，不传则为空） | 否 | - |
+| env_type | 环境类型：`prod`（正式环境）/ `beta`（测试环境） | 否 | `prod` |
+
+> OBS 上传与 APIG 回调所需凭证（`HUAWEICLOUD_OIDC_AK` / `HUAWEICLOUD_OIDC_SK` / `HUAWEICLOUD_SECURITY_TOKEN`）由 `huaweicloud-oidc-auth` 插件自动注入环境变量，无需通过本插件输入。
 
 ## 输出参数
 
 | 参数 | 说明 |
 |------|------|
-| result | 上传结果:`success` 或 `failed` |
+| result | 上传结果：`success` 或 `failed` |
 
 ## OBS 路径规则
 
-最终 OBS 对象键的格式为(路径前缀内置为 `codeql-results`,不可配置):
+最终 OBS 对象键的格式为（路径前缀内置为 `code-arts-check-results`，不可配置）：
 
 ```
-codeql-results/{repoBaseName}/{YYYYMMDD.HH}[/{workflowRunId}]/{sarifFileName}
+code-arts-check-results/{repoBaseName}/{YYYYMMDD.HH}[/{workflowRunId}]/{sarifFileName}
 ```
 
 - `repoBaseName`: 从环境变量 `ATOMGIT_REPOSITORY` 或 `GIT_REPOSITORY` 提取仓库名
-- 时间戳: 按执行时刻生成,精确到小时
-- `workflowRunId`: 若环境变量 `workflow_run_id` 存在则加入路径中,用于区分不同流水线运行
-- 支持单文件或多文件(目录模式),所有 SARIF 文件统一上传到同一前缀路径
+- 时间戳: 按执行时刻生成，精确到小时
+- `workflowRunId`: 若环境变量 `ATOMGIT_RUN_ID` 存在则加入路径中，用于区分不同流水线运行
+- 支持单文件或多文件（目录模式），所有 SARIF 文件统一上传到同一前缀路径
 
-OBS 桶: `openlibing-codeql`
+OBS 桶: `openlibing-gitcode-action`
 - 写入 Endpoint: `obs.cn-southwest-2.myhuaweicloud.com`
-- 读取 Endpoint: `https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com`
+- 读取 Endpoint: `https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com`
 
 ## 回调通知
 
-上传成功后,插件会通过 APIG 网关向 OpenLibing 服务发送 POST 回调,携带仓库、流水线、提交与 SARIF 下载地址等信息。
+上传成功后，插件会通过 APIG 网关向 OpenLibing 服务发送 POST 回调（`/action-api/codescan/v1/result/receive`，网关 IAM 认证），携带仓库、流水线、提交与 SARIF 下载地址等信息。
 
 回调 payload 字段:
 
@@ -60,103 +78,92 @@ OBS 桶: `openlibing-codeql`
 | repoUrl | `ATOMGIT_REPOSITORY_URL` |
 | pipelineId | `ATOMGIT_PIPELINE_ID` |
 | pipelineName | `PIPELINE_NAME` |
-| pipelineRunId | `workflow_run_id` 环境变量 |
-| branch | `ATOMGIT_HEAD_REF` |
+| pipelineRunId | `ATOMGIT_RUN_ID` |
+| branch | `ATOMGIT_HEAD_REF`（MR 事件）或 `ATOMGIT_REF_NAME` |
 | commitId | `ATOMGIT_SHA` |
-| obsUrl | SARIF 文件下载地址(单文件为字符串,多文件为数组) |
-| category | 用户传入的 `category`,不传则默认为 `default` |
+| obsUrl | SARIF 文件下载地址（恒为数组，匹配后端 `List<String>` DTO） |
+| category | 用户传入的 `category`，不传则为空 |
 | source | 固定值 `GITCODE_ACTION` |
-| sourceRunUrl | 根据仓库 URL 和 `workflow_run_id` 拼接的 GitCode 运行链接 |
+| sourceRunUrl | 根据仓库 URL 和 `ATOMGIT_RUN_ID` 拼接的 GitCode 运行链接 |
 
-APIG 网关鉴权(HMAC-SHA256 签名):
-
-| 输入参数 | 说明 |
-|----------|------|
-| `apig_app_key` | AppKey,作为签名 Access Key |
-| `apig_app_secret` | AppSecret,作为签名密钥 |
-
-当 `apig_app_key` 和 `apig_app_secret` 都传入时,会使用 HMAC-SHA256 方式对请求进行签名;均未传入则不签名直接发送。
-
-执行日志中会输出当前是否携带了各 APIG 凭据(不打印明文)。回调失败不会影响最终结果(只输出 WARN 日志),SARIF 上传成功即视为成功。
+回调失败不影响最终结果（只输出 WARN 日志），SARIF 上传成功即视为成功。
 
 ## 使用示例
 
-### 基础用法
+### 基础用法（单文件）
 
 ```yaml
 steps:
   - name: 检出代码
     uses: checkout
     with:
-      repository: https://gitcode.com/your-org/your-repo.git
-      ref: master
+      token: ${{ secrets.GC_TOKEN }}
 
-  - name: 运行 CodeQL 扫描
-    uses: codeql-action
+  - name: 获取华为云临时凭证（OIDC）
+    uses: huaweicloud-oidc-auth
     with:
-      language: javascript
-      source-root: ./
-      output-path: ./codeql-results.sarif
-      query-suite: security-and-quality
+      audience: huawei-cloud-service
+      agency_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:agency:gitcode-actions
+      provider_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:oidcProvider:GitCodeActions
+      region: cn-southwest-2
+      duration: 3600
+
+  - name: 运行扫描工具生成 SARIF
+    run: |
+      # 任意可产出 SARIF 的扫描工具，如 codeql / spotbugs / gitleaks 等
+      codeql database analyze ... --format=sarif-latest --output=./scan-results.sarif
 
   - name: 上传 SARIF 到 OpenLibing
     uses: openlibing-upload-sarif
     with:
-      sarif_file: ./codeql-results.sarif
-      obs_ak: ${{ secrets.OPENLIBING_OBS_AK }}
-      obs_sk: ${{ secrets.OPENLIBING_OBS_SK }}
-      apig_app_key: ${{ secrets.OPENLIBING_APIG_APP_KEY }}
-      apig_app_secret: ${{ secrets.OPENLIBING_APIG_APP_SECRET }}
+      sarif_file: ./scan-results.sarif
       category: 'security-scan'
+      env_type: beta
 ```
 
-> `apig_app_key` / `apig_app_secret` 为可选 APIG 鉴权参数,若无需签名鉴权可省略。`category` 为可选分类标签。
-
-### 多 SARIF 文件(目录模式)
+### 多 SARIF 文件（目录模式）
 
 ```yaml
   - name: 上传多个 SARIF 文件
     uses: openlibing-upload-sarif
     with:
       sarif_file: ./codeql-results/
-      obs_ak: ${{ secrets.OPENLIBING_OBS_AK }}
-      obs_sk: ${{ secrets.OPENLIBING_OBS_SK }}
 ```
 
-当 `sarif_file` 为目录时,插件会自动扫描目录下所有 `.sarif` 文件并逐一上传。
+当 `sarif_file` 为目录时，插件会自动扫描目录下所有 `.sarif` 文件并逐一上传。
 
 ## 构建产物 JSON 格式
 
-插件会在临时目录下生成 `build-result.json`,并随 SARIF 一同上传到 OBS。
+插件会在临时目录下生成 `build-result.json`，并随 SARIF 一同上传到 OBS。`type` 字段优先取自 SARIF 的 `runs[0].tool.driver.name`（如 `CodeQL`、`SpotBugs`、`Gitleaks`），解析失败则使用通用类型。
 
-**单文件模式**(只有一个 SARIF 文件时,`buildings` 为单个对象):
+**单文件模式**（只有一个 SARIF 文件时，`buildings` 为单个对象）:
 
 ```json
 {
   "type": "build",
   "buildings": {
-    "name": "codeql-results.sarif",
+    "name": "scan-results.sarif",
     "type": "CodeQL代码检查结果（sarif）",
-    "downloadUrl": "https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250625.14/run-123/codeql-results.sarif"
+    "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/code-arts-check-results/your-repo/20250910.14/run-123/scan-results.sarif"
   }
 }
 ```
 
-**多文件模式**(多个 SARIF 文件时,`buildings` 为数组):
+**多文件模式**（多个 SARIF 文件时，`buildings` 为数组）:
 
 ```json
 {
   "type": "build",
   "buildings": [
     {
-      "name": "codeql-results-java.sarif",
+      "name": "codeql-java.sarif",
       "type": "CodeQL代码检查结果（sarif）",
-      "downloadUrl": "https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250625.14/run-123/codeql-results-java.sarif"
+      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/code-arts-check-results/your-repo/20250910.14/run-123/codeql-java.sarif"
     },
     {
-      "name": "codeql-results-js.sarif",
-      "type": "CodeQL代码检查结果（sarif）",
-      "downloadUrl": "https://openlibing-codeql.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250625.14/run-123/codeql-results-js.sarif"
+      "name": "spotbugs.sarif",
+      "type": "SpotBugs代码检查结果（sarif）",
+      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/code-arts-check-results/your-repo/20250910.14/run-123/spotbugs.sarif"
     }
   ]
 }
@@ -164,21 +171,19 @@ steps:
 
 ## 执行流程
 
-1. 校验输入参数(`sarif_file`、`obs_ak`、`obs_sk`)
-2. 检查 SARIF 文件存在(自动尝试在 workspace 与 Git 目录中查找,支持目录模式自动扫描)
+1. 校验输入参数（`sarif_file`、OIDC 临时凭证）
+2. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描）
 3. 下载并解压 `obsutil` 工具
-4. 根据仓库名、时间戳与 `workflow_run_id` 构建 OBS 路径
-5. 生成 `build-result.json` 构建产物
-6. 上传构建产物目录与 SARIF 文件到 OBS
-7. 通过 APIG 回调通知 OpenLibing 服务(包含 category、source、sourceRunUrl 等字段)
+4. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
+5. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
+6. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限）
+7. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`）
 
 ## 注意事项
 
-- 运行前需先使用 `official_checkout` 检出代码,以便插件能从环境变量中获取仓库信息
-- 需要前置执行 `codeql-action` 等可生成 SARIF 文件的步骤,并提供 `sarif_file` 路径
-- SARIF 文件路径支持单文件或目录模式;目录模式会自动扫描目录下所有 `.sarif` 文件
-- 回调通知失败仅产生 WARN,不会阻断流程,最终结果以 OBS 上传是否成功为准
-- OBS 桶 `openlibing-codeql`、路径前缀 `codeql-results`、APIG 回调地址均已硬编码在插件中,如有变更需修改源码
-- 插件运行依赖 Bash 环境(使用 `shell: '/bin/bash'` 调用 `execSync`)
-- `workflow_run_id` 需由调用方在 step env 中注入,用于构建 OBS 路径和回调 payload
-
+- 运行前需先使用 `checkout` 检出代码，并在本插件之前运行 `huaweicloud-oidc-auth` 插件换取临时凭证
+- Workflow 必须声明 `permissions: id-token: write` 才能申请 OIDC ID Token
+- 前置扫描工具需产出标准 SARIF 文件，并提供 `sarif_file` 路径（文件或目录）
+- 回调通知失败仅产生 WARN，不会阻断流程，最终结果以 OBS 上传是否成功为准
+- OBS 桶 `openlibing-gitcode-action`、路径前缀 `code-arts-check-results`、APIG 回调地址均已硬编码在插件中，如有变更需修改源码
+- 插件运行依赖 Bash 环境（使用 `shell: '/bin/bash'` 调用 `execSync`）
