@@ -5,33 +5,23 @@
 通用 SARIF 上传插件：将任意静态扫描工具产出的 SARIF 文件（支持单文件或目录）上传到华为云 OBS 对象存储，生成标准化的构建产物 JSON，并通过 APIG 网关回调通知 OpenLibing 服务。
 
 - **插件名**: `openlibing-upload-sarif`
-- **认证模式**: OIDC 联邦认证（免静态 AK/SK），凭证由 `huaweicloud-oidc-auth` 插件注入
+- **认证模式**: OIDC 联邦认证（免静态 AK/SK），由插件内嵌 SDK 自包含换证，无需额外运行 `huaweicloud-oidc-auth` 插件
 
 ## 功能特性
 
 - 通用 SARIF 上传：不绑定任何具体扫描工具，支持单文件或目录（自动扫描目录下所有 `.sarif` 文件）
 - 自动识别 SARIF 文件中的工具名（`runs[0].tool.driver.name`）用于构建产物类型，后端按 `tool.driver.name` 路由
-- OIDC 免静态凭证：OBS 上传与 APIG 回调均使用 `huaweicloud-oidc-auth` 插件注入的临时凭证
+- OIDC 免静态凭证：插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK，自申请 OIDC ID Token 并调用华为云 STS 换证，OBS 上传与 APIG 回调全程使用临时凭证
 - 自动下载安装 `obsutil` 命令行工具，上传对象设置公共读权限
 - 通过 APIG 网关回调通知 OpenLibing 扫描服务（V11-HMAC-SHA256 签名 + `X-Security-Token`）
 
 ## 前置要求
 
-Workflow 必须声明 `permissions: id-token: write`，并在本插件之前运行 `huaweicloud-oidc-auth` 插件换取临时凭证：
+Workflow 只需声明 `permissions: id-token: write`。插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK 会自动向流水线申请 OIDC ID Token 并调用华为云 STS 换取临时凭证，**无需再运行 `huaweicloud-oidc-auth` 插件**：
 
 ```yaml
 permissions:
   id-token: write
-
-steps:
-  - name: 获取华为云临时凭证（OIDC）
-    uses: huaweicloud-oidc-auth
-    with:
-      audience: huawei-cloud-service
-      agency_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:agency:gitcode-actions
-      provider_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:oidcProvider:GitCodeActions
-      region: cn-southwest-2
-      duration: 3600
 ```
 
 ## 输入参数
@@ -42,7 +32,7 @@ steps:
 | category | 检查结果分类（用户手动传入，不传则为空） | 否 | - |
 | env_type | 环境类型：`prod`（正式环境）/ `beta`（测试环境） | 否 | `prod` |
 
-> OBS 上传与 APIG 回调所需凭证（`HUAWEICLOUD_OIDC_AK` / `HUAWEICLOUD_OIDC_SK` / `HUAWEICLOUD_SECURITY_TOKEN`）由 `huaweicloud-oidc-auth` 插件自动注入环境变量，无需通过本插件输入。
+> OBS 上传与 APIG 回调所需临时凭证由插件内嵌 SDK 自动换取（OIDC ID Token 自申请 + STS 换证），无需通过本插件输入，也无需在 workflow 中运行 `huaweicloud-oidc-auth` 插件。
 
 ## 输出参数
 
@@ -98,15 +88,6 @@ steps:
     uses: checkout
     with:
       token: ${{ secrets.GC_TOKEN }}
-
-  - name: 获取华为云临时凭证（OIDC）
-    uses: huaweicloud-oidc-auth
-    with:
-      audience: huawei-cloud-service
-      agency_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:agency:gitcode-actions
-      provider_urn: iam::4d29a984c4fe4e6eb5d404a853d0084e:oidcProvider:GitCodeActions
-      region: cn-southwest-2
-      duration: 3600
 
   - name: 运行扫描工具生成 SARIF
     run: |
@@ -171,18 +152,19 @@ steps:
 
 ## 执行流程
 
-1. 校验输入参数（`sarif_file`、OIDC 临时凭证）
-2. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描）
-3. 下载并解压 `obsutil` 工具
-4. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
-5. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
-6. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限）
-7. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`）
+1. 校验输入参数（`sarif_file`、SDK 加载状态）
+2. SDK 自包含 OIDC 换证（自申请 OIDC ID Token + 调用华为云 STS 换取临时凭证）
+3. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描）
+4. 下载并解压 `obsutil` 工具
+5. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
+6. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
+7. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限）
+8. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`）
 
 ## 注意事项
 
-- 运行前需先使用 `checkout` 检出代码，并在本插件之前运行 `huaweicloud-oidc-auth` 插件换取临时凭证
-- Workflow 必须声明 `permissions: id-token: write` 才能申请 OIDC ID Token
+- 运行前需先使用 `checkout` 检出代码；Workflow 必须声明 `permissions: id-token: write` 才能申请 OIDC ID Token
+- 插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK 自动完成换证，**无需运行 `huaweicloud-oidc-auth` 插件**
 - 前置扫描工具需产出标准 SARIF 文件，并提供 `sarif_file` 路径（文件或目录）
 - 回调通知失败仅产生 WARN，不会阻断流程，最终结果以 OBS 上传是否成功为准
 - OBS 桶 `openlibing-gitcode-action`、路径前缀 `code-arts-check-results`、APIG 回调地址均已硬编码在插件中，如有变更需修改源码

@@ -10,13 +10,15 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// OIDC 签名 SDK：APIG V11-HMAC-SHA256 签名 + HTTPS 请求。
-// 临时凭证（HUAWEICLOUD_OIDC_AK / HUAWEICLOUD_OIDC_SK / HUAWEICLOUD_SECURITY_TOKEN）
-// 由官方 huaweicloud-oidc-auth 插件在 workflow 中注入环境变量，本插件不管理凭证。
+// OIDC SDK：APIG V11-HMAC-SHA256 签名 + HTTPS 请求 + 自包含 OIDC 换证。
+// getCredentials() 通过 Actions 兼容流水线环境变量（ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN）
+// 自申请 OIDC ID Token，再调用华为云 STS AssumeAgencyWithOIDC 换取临时 AK/SK/SecurityToken，
+// 无需在 workflow 中额外运行 huaweicloud-oidc-auth 插件（仅需声明 permissions: id-token: write）。
 let V11Signer = null;
 let sendRequest = null;
+let getCredentials = null;
 try {
-  ({ V11Signer, sendRequest } = require('@openlibing/huaweicloud-oidc-client'));
+  ({ V11Signer, sendRequest, getCredentials } = require('@openlibing/huaweicloud-oidc-client'));
 } catch (e) {
   console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，请重新构建 dist 后重试');
 }
@@ -96,25 +98,22 @@ function sanitizePath(pathStr) {
 // ---------- OIDC 回调 ----------
 
 /**
- * OIDC 回调：用官方 huaweicloud-oidc-auth 插件注入的临时凭证对 APIG 请求做
+ * OIDC 回调：用 SDK 换取的临时凭证对 APIG 请求做
  * V11-HMAC-SHA256 签名 + X-Security-Token 后上报（网关 IAM 认证，免静态凭证）。
  * @param {string} url APIG 回调地址
  * @param {Object} payload 回调报文
+ * @param {{accessKeyId: string, secretAccessKey: string, securityToken: string|null}} cred SDK 换取的临时凭证
  * @returns {Promise<Object>} 响应体（code=200/0 视为成功）
  */
-async function sendCallbackOidc(url, payload) {
+async function sendCallbackOidc(url, payload, cred) {
   if (!V11Signer || !sendRequest) {
     throw new Error('@openlibing/huaweicloud-oidc-client 未加载，无法进行 OIDC 回调');
   }
-  const ak = process.env.HUAWEICLOUD_OIDC_AK || '';
-  const sk = process.env.HUAWEICLOUD_OIDC_SK || '';
-  const token = process.env.HUAWEICLOUD_SECURITY_TOKEN || '';
-
   const signer = new V11Signer({ region: APIG_SIGN_REGION });
-  signer.Key = ak;
-  signer.Secret = sk;
+  signer.Key = cred.accessKeyId;
+  signer.Secret = cred.secretAccessKey;
   const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Security-Token'] = token;
+  if (cred.securityToken) headers['X-Security-Token'] = cred.securityToken;
 
   const body = JSON.stringify(payload);
   const signedHeaders = signer.sign('POST', url, headers, body);
@@ -170,11 +169,11 @@ function installObsutil() {
 }
 
 /** 将 OIDC 临时凭证写入 obsutil 独立配置文件，返回上传命令的鉴权参数 */
-function writeObsutilConfig(obsutilPath, oidcAk, oidcSk, oidcToken) {
+function writeObsutilConfig(obsutilPath, cred) {
   const configPath = path.join(os.tmpdir(), 'obsutil-oidc-config');
   try {
     exec(`touch ${configPath}`); // -config= 指向的文件必须已存在（obsutil 只更新不创建）
-    execObsutil(`${obsutilPath} config -i="${oidcAk}" -k="${oidcSk}" -t="${oidcToken}" -e="${OBS_WRITE_ENDPOINT}" -config="${configPath}"`);
+    execObsutil(`${obsutilPath} config -i="${cred.accessKeyId}" -k="${cred.secretAccessKey}" -t="${cred.securityToken}" -e="${OBS_WRITE_ENDPOINT}" -config="${configPath}"`);
   } catch (err) {
     console.log(`[ERROR] 写入 obsutil 配置文件失败: ${err.message}`);
     setOutput('result', 'failed');
@@ -204,16 +203,11 @@ async function run() {
   const isBetaEnv = envType === 'beta';
   const workflowRunId = process.env.ATOMGIT_RUN_ID || '';
 
-  // OIDC 临时凭证：由官方 huaweicloud-oidc-auth 插件写入环境变量（APIG 回调 / OBS 上传必须）
-  const oidcAk = process.env.HUAWEICLOUD_OIDC_AK || '';
-  const oidcSk = process.env.HUAWEICLOUD_OIDC_SK || '';
-  const oidcToken = process.env.HUAWEICLOUD_SECURITY_TOKEN || '';
-
   const callbackUrl = (isBetaEnv ? OIDC_BETA_BASE : OIDC_PROD_BASE) + OIDC_API_PREFIX + CALLBACK_PATH;
 
   console.log('===== openlibing-upload-sarif 启动 =====');
   console.log(`[INFO] 环境类型: ${isBetaEnv ? 'beta (测试环境)' : 'prod (正式环境)'}`);
-  console.log('[INFO] 认证模式: OIDC 联邦认证（凭证由 huaweicloud-oidc-auth 插件提供）');
+  console.log('[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）');
   console.log(`[INFO] 回调地址: ${callbackUrl}`);
 
   console.log('\n===== [1] 校验参数 =====');
@@ -222,23 +216,29 @@ async function run() {
     setOutput('result', 'failed');
     process.exit(1);
   }
-  const missingInputs = [];
-  if (!oidcAk || !oidcSk) {
-    missingInputs.push('OIDC 临时凭证（请先在 workflow 运行 huaweicloud-oidc-auth 插件）');
-  }
-  if (missingInputs.length > 0) {
-    console.log(`[ERROR] 缺少必要的参数: ${missingInputs.join(', ')}`);
-    setOutput('result', 'failed');
-    process.exit(1);
-  }
-  if (!V11Signer || !sendRequest) {
-    console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，无法进行 OIDC 签名回调');
+  if (!V11Signer || !sendRequest || !getCredentials) {
+    console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，无法进行 OIDC 认证');
     setOutput('result', 'failed');
     process.exit(1);
   }
   console.log('[OK] 参数校验通过');
 
-  console.log('\n===== [2] 检查 SARIF 文件 =====');
+  console.log('\n===== [2] OIDC 免密换证（SDK 自包含） =====');
+  let cred;
+  try {
+    cred = await getCredentials();
+    if (!cred || !cred.accessKeyId || !cred.secretAccessKey) {
+      throw new Error('换证结果缺少 AK/SK');
+    }
+  } catch (err) {
+    console.log(`[ERROR] OIDC 换证失败: ${err.message}`);
+    console.log('[INFO] 请确认 workflow 已声明 permissions: id-token: write');
+    setOutput('result', 'failed');
+    process.exit(1);
+  }
+  console.log('[OK] 临时凭证获取成功（OIDC ID Token 自申请 + STS 换证）');
+
+  console.log('\n===== [3] 检查 SARIF 文件 =====');
   const workspace = process.env.WORKSPACE || process.cwd();
   let resolvedSarifPath = sarifFile;
   if (!fs.existsSync(resolvedSarifPath)) {
@@ -278,7 +278,7 @@ async function run() {
     console.log(`[OK] SARIF 文件: ${resolvedSarifPath}`);
   }
 
-  console.log('\n===== [3] 安装 obsutil =====');
+  console.log('\n===== [4] 安装 obsutil =====');
   let obsutilPath;
   try {
     obsutilPath = installObsutil();
@@ -288,7 +288,7 @@ async function run() {
     process.exit(1);
   }
 
-  console.log('\n===== [4] 构建 OBS 路径 =====');
+  console.log('\n===== [5] 构建 OBS 路径 =====');
   const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
@@ -297,7 +297,7 @@ async function run() {
   console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${obsKeyPrefix}/`);
   console.log(`[INFO] 下载前缀: ${downloadUrlPrefix}`);
 
-  console.log('\n===== [5] 生成构建产物 JSON =====');
+  console.log('\n===== [6] 生成构建产物 JSON =====');
   const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
   if (!fs.existsSync(buildResultDir)) {
     fs.mkdirSync(buildResultDir, { recursive: true });
@@ -322,8 +322,8 @@ async function run() {
   const buildResultPath = path.join(buildResultDir, 'build-result.json');
   fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
 
-  console.log('\n===== [6] 上传到 OBS =====');
-  const obsAuthArgs = writeObsutilConfig(obsutilPath, oidcAk, oidcSk, oidcToken);
+  console.log('\n===== [7] 上传到 OBS =====');
+  const obsAuthArgs = writeObsutilConfig(obsutilPath, cred);
 
   console.log('[INFO] 上传构建产物文件: build-result.json');
   try {
@@ -357,7 +357,7 @@ async function run() {
   console.log('[INFO] 上传成功');
   console.log('================================================================');
 
-  console.log('\n===== [7] 回调通知 =====');
+  console.log('\n===== [8] 回调通知 =====');
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
     pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
@@ -373,7 +373,7 @@ async function run() {
   };
 
   try {
-    const callbackResult = await sendCallbackOidc(callbackUrl, callbackPayload);
+    const callbackResult = await sendCallbackOidc(callbackUrl, callbackPayload, cred);
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
     const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
