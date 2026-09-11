@@ -11,6 +11,7 @@
 
 - 通用 SARIF 上传：不绑定任何具体扫描工具，支持单文件或目录（自动扫描目录下所有 `.sarif` 文件）
 - 自动识别 SARIF 文件中的工具名（`runs[0].tool.driver.name`）用于构建产物类型，后端按 `tool.driver.name` 路由
+- 自动补齐 `region.snippet`（代码上下文）：SARIF 缺少代码片段信息时，按 `uri` + 行号读取源码补齐，提升后端告警可读性
 - OIDC 免静态凭证：插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK，自申请 OIDC ID Token 并调用华为云 STS 换证，OBS 上传与 APIG 回调全程使用临时凭证
 - 自动下载安装 `obsutil` 命令行工具，上传对象设置公共读权限
 - 通过 APIG 网关回调通知 OpenLibing 扫描服务（V11-HMAC-SHA256 签名 + `X-Security-Token`）
@@ -30,6 +31,7 @@ permissions:
 |------|------|------|--------|
 | sarif_file | SARIF 文件路径或所在目录（相对/绝对路径均可，目录自动扫描所有 `.sarif` 文件） | 是 | - |
 | category | 检查结果分类（用户手动传入，不传则为空） | 否 | - |
+| source_path | 源码根目录（可选，逗号分隔多个）。SARIF 缺少 `region.snippet` 时按 `uri`+行号读源码补齐；不传则默认在 `ATOMGIT_WORKSPACE` 下按文件名查找 | 否 | - |
 | env_type | 环境类型：`prod`（正式环境）/ `beta`（测试环境） | 否 | `prod` |
 
 > OBS 上传与 APIG 回调所需临时凭证由插件内嵌 SDK 自动换取（OIDC ID Token 自申请 + STS 换证），无需通过本插件输入，也无需在 workflow 中运行 `huaweicloud-oidc-auth` 插件。
@@ -109,9 +111,18 @@ steps:
     uses: openlibing-upload-sarif
     with:
       sarif_file: ./codeql-results/
+      source_path: ./src   # 可选：源码根目录，SARIF 缺 snippet 时自动补齐代码片段
 ```
 
 当 `sarif_file` 为目录时，插件会自动扫描目录下所有 `.sarif` 文件并逐一上传。
+
+### 自动补齐代码片段（region.snippet）
+
+部分扫描工具（如 SpotBugs）的原生 SARIF 只输出行号、不含代码文本。插件在检测到 `region` 缺少 `snippet` 时，按 `artifactLocation.uri` + `startLine(/endLine)` 从源码根目录读取对应代码行自动补齐：
+
+- `source_path` 未配置时，默认在 `ATOMGIT_WORKSPACE` 下按文件名递归查找源码
+- 已含 `region.snippet.text` 的 result 跳过，不重复处理
+- 源码不可读时静默跳过，不影响上传
 
 ## 构建产物 JSON 格式
 
@@ -155,11 +166,12 @@ steps:
 1. 校验输入参数（`sarif_file`、SDK 加载状态）
 2. SDK 自包含 OIDC 换证（自申请 OIDC ID Token + 调用华为云 STS 换取临时凭证）
 3. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描）
-4. 下载并解压 `obsutil` 工具
-5. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
-6. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
-7. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限）
-8. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`）
+4. 检查并补齐代码片段（`region.snippet` 缺失时按 `uri`+行号读源码补齐）
+5. 下载并解压 `obsutil` 工具
+6. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
+7. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
+8. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限）
+9. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`）
 
 ## 注意事项
 

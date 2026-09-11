@@ -1,5 +1,5 @@
 name: 'openlibing-upload-sarif'
-version: 1.1.2
+version: 1.1.3
 author: 'test-devops'
 description: '将任意工具产出的 SARIF 扫描结果上传到 OBS 并生成构建产物 JSON（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）'
 
@@ -23,6 +23,18 @@ inputs:
     layout:
       type: 'input'
       label: '结果分类'
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ''
+  source_path:
+    description: '源码根目录（可选，逗号分隔多个）。SARIF 缺少 region.snippet（代码上下文）时，按 uri+行号读源码补齐；不传则默认在 ATOMGIT_WORKSPACE 下按文件名查找'
+    required: false
+    default: ''
+    layout:
+      type: 'input'
+      label: '源码根目录'
       extend_prop:
         visible_conditions: []
         disabled_conditions: []

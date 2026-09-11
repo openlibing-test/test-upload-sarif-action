@@ -201,6 +201,100 @@ function extractToolName(sarifFile) {
   }
 }
 
+// ---------- region.snippet 补齐 ----------
+
+/** shell 单参数转义（用于 find 命令的引号包裹参数，防注入） */
+function escapeShellArg(s) {
+  return String(s).replace(/(["'`$\\])/g, '\\$1');
+}
+
+/**
+ * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到返回 null。
+ * 依次尝试：绝对路径（file:// 或 / 开头）→ sourceRoots 直接拼接 → 按文件名递归兜底查找。
+ */
+function resolveSourceFile(uri, sourceRoots) {
+  let p = (uri || '').trim();
+  if (!p) return null;
+  if (p.startsWith('file://')) {
+    try {
+      const filePath = decodeURIComponent(p.replace(/^file:\/\//i, ''));
+      return fs.existsSync(filePath) ? filePath : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/')) {
+    return fs.existsSync(p) && fs.statSync(p).isFile() ? p : null;
+  }
+  p = p.replace(/^\.\//, '').replace(/^\/+/, '');
+  for (const root of sourceRoots) {
+    const cand = path.join(root, p);
+    if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+  }
+  const base = path.basename(p);
+  if (base) {
+    for (const root of sourceRoots) {
+      const found = execCapture(`find "${escapeShellArg(root)}" -name "${escapeShellArg(base)}" -type f 2>/dev/null | head -1`);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * 为 SARIF results 补充 region.snippet（实际代码行内容），提升后端告警可读性。
+ * 仅当 region 缺少 snippet 时补齐：按 artifactLocation.uri + startLine(/endLine) 读源码；
+ * 有 endLine 取多行，否则单行；源码不可读时静默跳过。
+ * @returns {number} 成功补齐的 result 数量
+ */
+function enrichRegionSnippet(sarifObj, sourceRoots) {
+  const results = sarifObj && sarifObj.runs && sarifObj.runs[0] && sarifObj.runs[0].results;
+  if (!Array.isArray(results) || !sourceRoots || sourceRoots.length === 0) return 0;
+  let enriched = 0;
+  for (const r of results) {
+    const loc = r && r.locations && r.locations[0] && r.locations[0].physicalLocation;
+    if (!loc || !loc.artifactLocation || !loc.artifactLocation.uri) continue;
+    const region = loc.region;
+    if (!region || !region.startLine || region.startLine < 1) continue;
+    if (region.snippet && region.snippet.text) continue; // 已有代码上下文，跳过
+    const src = resolveSourceFile(loc.artifactLocation.uri, sourceRoots);
+    if (!src) continue;
+    let lines;
+    try {
+      lines = fs.readFileSync(src, 'utf-8').split(/\r?\n/);
+    } catch (e) {
+      continue;
+    }
+    const start = region.startLine;
+    const end = region.endLine || start;
+    const snippetLines = lines.slice(start - 1, end);
+    if (!snippetLines.length) continue;
+    region.snippet = { text: snippetLines.join('\n') };
+    enriched++;
+  }
+  return enriched;
+}
+
+/** 遍历 SARIF 文件，缺少 region.snippet 时补齐并写回原文件 */
+function enrichSarifFiles(sarifFiles, sourceRoots) {
+  for (const f of sarifFiles) {
+    let sarifObj;
+    try {
+      sarifObj = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    } catch (e) {
+      console.log(`[WARN] 无法解析 SARIF: ${path.basename(f)}，跳过代码片段补齐`);
+      continue;
+    }
+    const n = enrichRegionSnippet(sarifObj, sourceRoots);
+    if (n > 0) {
+      fs.writeFileSync(f, JSON.stringify(sarifObj, null, 2), 'utf-8');
+      console.log(`[OK] ${path.basename(f)}: 已补充 ${n} 个 result 的 region.snippet`);
+    } else {
+      console.log(`[INFO] ${path.basename(f)}: 无需补充（已含 snippet 或源码不可读）`);
+    }
+  }
+}
+
 // ---------- 主流程 ----------
 
 async function run() {
@@ -285,7 +379,22 @@ async function run() {
     console.log(`[OK] SARIF 文件: ${resolvedSarifPath}`);
   }
 
-  console.log('\n===== [4] 安装 obsutil =====');
+  console.log('\n===== [4] 检查并补齐代码片段（region.snippet） =====');
+  const sourcePathInput = getInput('source_path');
+  const sourceRoots = [];
+  if (sourcePathInput) {
+    for (const p of sourcePathInput.split(',')) {
+      const trimmed = p.trim();
+      if (!trimmed) continue;
+      sourceRoots.push(fs.existsSync(trimmed) ? trimmed : path.join(workspace, trimmed));
+    }
+  }
+  // 始终兜底：ATOMGIT_WORKSPACE 下按文件名查找
+  sourceRoots.push(workspace);
+  console.log(`[INFO] 源码根目录: ${sourceRoots.join(', ')}`);
+  enrichSarifFiles(sarifFiles, sourceRoots);
+
+  console.log('\n===== [5] 安装 obsutil =====');
   let obsutilPath;
   try {
     obsutilPath = installObsutil();
@@ -295,7 +404,7 @@ async function run() {
     process.exit(1);
   }
 
-  console.log('\n===== [5] 构建 OBS 路径 =====');
+  console.log('\n===== [6] 构建 OBS 路径 =====');
   const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
@@ -304,7 +413,7 @@ async function run() {
   console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${obsKeyPrefix}/`);
   console.log(`[INFO] 下载前缀: ${downloadUrlPrefix}`);
 
-  console.log('\n===== [6] 生成构建产物 JSON =====');
+  console.log('\n===== [7] 生成构建产物 JSON =====');
   const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
   if (!fs.existsSync(buildResultDir)) {
     fs.mkdirSync(buildResultDir, { recursive: true });
@@ -329,7 +438,7 @@ async function run() {
   const buildResultPath = path.join(buildResultDir, 'build-result.json');
   fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
 
-  console.log('\n===== [7] 上传到 OBS =====');
+  console.log('\n===== [8] 上传到 OBS =====');
   const obsAuthArgs = writeObsutilConfig(obsutilPath, cred);
 
   console.log('[INFO] 上传构建产物文件: build-result.json');
@@ -364,7 +473,7 @@ async function run() {
   console.log('[INFO] 上传成功');
   console.log('================================================================');
 
-  console.log('\n===== [8] 回调通知 =====');
+  console.log('\n===== [9] 回调通知 =====');
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
     pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
@@ -393,7 +502,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run };
+module.exports = { run, enrichRegionSnippet, enrichSarifFiles, resolveSourceFile };
 
 if (require.main === require.cache[eval('__filename')]) {
   run().catch(err => {
