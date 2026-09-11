@@ -90,6 +90,46 @@ function execObsutil(cmd) {
   execSync(cmd, { stdio: 'inherit', shell: '/bin/bash' });
 }
 
+/**
+ * 同步指数退避重试：默认 3 次，失败后 sleep(2^(n-1) 秒) 再试。
+ * 用于 OBS 上传等同步命令，降低网络抖动导致的数据丢失风险（设计文档 5.3）。
+ */
+function withRetrySync(fn, { retries = 3, label = '' } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries) break;
+      const delaySec = Math.pow(2, attempt - 1);
+      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delaySec}s 后重试（${attempt + 1}/${retries}）`);
+      execSync(`sleep ${delaySec}`, { shell: '/bin/bash' });
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * 异步指数退避重试：默认 3 次，失败后 sleep(2^(n-1) * 1000ms) 再试。
+ * 用于 APIG 回调等异步请求（设计文档 5.3）。
+ */
+async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries) break;
+      const delayMs = Math.pow(2, attempt - 1) * 1000;
+      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delayMs}ms 后重试（${attempt + 1}/${retries}）`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 /** 日志脱敏：IP 地址替换为占位符 */
 function sanitizePath(pathStr) {
   return pathStr.replace(/(\d+\.\d+\.\d+\.\d+)/g, '[IP_ADDRESS]');
@@ -288,6 +328,26 @@ function enrichSarifFiles(sarifFiles, sourceRoots) {
   }
 }
 
+/**
+ * 将全量代码检查统一元数据（layer/mode）写入 SARIF runs[].properties，随结果一并落库
+ * （设计文档 5.1：layer / mode 等元数据注入 runs[].properties 或上传参数）。
+ */
+function injectSarifMetadata(sarifFiles, metadata) {
+  for (const f of sarifFiles) {
+    try {
+      const sarifObj = JSON.parse(fs.readFileSync(f, 'utf-8'));
+      const run = sarifObj && sarifObj.runs && sarifObj.runs[0];
+      if (!run) continue;
+      run.properties = run.properties || {};
+      Object.assign(run.properties, metadata);
+      fs.writeFileSync(f, JSON.stringify(sarifObj, null, 2), 'utf-8');
+      console.log(`[OK] ${path.basename(f)}: 已注入元数据 ${JSON.stringify(metadata)}`);
+    } catch (e) {
+      console.log(`[WARN] 无法注入元数据: ${path.basename(f)}（${e.message}）`);
+    }
+  }
+}
+
 // ---------- 主流程 ----------
 
 async function run() {
@@ -296,12 +356,19 @@ async function run() {
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const isBetaEnv = envType === 'beta';
   const workflowRunId = process.env.ATOMGIT_RUN_ID || '';
+  // 全量代码检查统一元数据（设计文档 5.1/5.4）
+  const layer = getInput('layer');
+  const mode = (getInput('mode') || 'full').toLowerCase();
+  const toolFailed = (getInput('tool_failed') || 'false').toLowerCase() === 'true';
 
   const callbackUrl = (isBetaEnv ? OIDC_BETA_BASE : OIDC_PROD_BASE) + OIDC_API_PREFIX + CALLBACK_PATH;
 
   console.log('===== openlibing-upload-sarif 启动 =====');
   console.log(`[INFO] 环境类型: ${isBetaEnv ? 'beta (测试环境)' : 'prod (正式环境)'}`);
   console.log('[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）');
+  console.log(`[INFO] 扫描层级 layer: ${layer || '（未指定）'}`);
+  console.log(`[INFO] 扫描模式 mode: ${mode}`);
+  console.log(`[INFO] 工具失败标记 tool_failed: ${toolFailed}`);
   console.log(`[INFO] 回调地址: ${callbackUrl}`);
 
   console.log('\n===== [1] 校验参数 =====');
@@ -345,31 +412,39 @@ async function run() {
     }
   }
   if (!fs.existsSync(resolvedSarifPath)) {
-    console.log(`[ERROR] SARIF 路径不存在: ${sarifFile}`);
-    setOutput('result', 'failed');
-    process.exit(1);
-  }
-
-  let sarifFiles = [];
-  const isDir = fs.statSync(resolvedSarifPath).isDirectory();
-  if (isDir) {
-    console.log(`[INFO] 输入为目录: ${resolvedSarifPath}，扫描所有 .sarif 文件`);
-    const entries = fs.readdirSync(resolvedSarifPath);
-    for (const entry of entries) {
-      if (entry.toLowerCase().endsWith(SARIF_EXT)) {
-        sarifFiles.push(path.join(resolvedSarifPath, entry));
-      }
-    }
-    if (sarifFiles.length === 0) {
-      console.log(`[ERROR] 目录中未找到 .sarif 文件: ${resolvedSarifPath}`);
+    if (toolFailed) {
+      console.log(`[WARN] tool_failed=true 且 SARIF 路径不存在（${sarifFile}），按失败元数据模式执行：跳过 OBS 上传，仅上报失败标记`);
+    } else {
+      console.log(`[ERROR] SARIF 路径不存在: ${sarifFile}`);
       setOutput('result', 'failed');
       process.exit(1);
     }
-    console.log(`[OK] 找到 ${sarifFiles.length} 个 SARIF 文件:`);
-    sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
+  }
+
+  let sarifFiles = [];
+  if (fs.existsSync(resolvedSarifPath)) {
+    const isDir = fs.statSync(resolvedSarifPath).isDirectory();
+    if (isDir) {
+      console.log(`[INFO] 输入为目录: ${resolvedSarifPath}，扫描所有 .sarif 文件`);
+      const entries = fs.readdirSync(resolvedSarifPath);
+      for (const entry of entries) {
+        if (entry.toLowerCase().endsWith(SARIF_EXT)) {
+          sarifFiles.push(path.join(resolvedSarifPath, entry));
+        }
+      }
+      if (sarifFiles.length === 0) {
+        console.log(`[ERROR] 目录中未找到 .sarif 文件: ${resolvedSarifPath}`);
+        setOutput('result', 'failed');
+        process.exit(1);
+      }
+      console.log(`[OK] 找到 ${sarifFiles.length} 个 SARIF 文件:`);
+      sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
+    } else {
+      sarifFiles = [resolvedSarifPath];
+      console.log(`[OK] SARIF 文件: ${resolvedSarifPath}`);
+    }
   } else {
-    sarifFiles = [resolvedSarifPath];
-    console.log(`[OK] SARIF 文件: ${resolvedSarifPath}`);
+    console.log('[WARN] 无 SARIF 文件可上传（tool_failed 模式）');
   }
 
   console.log('\n===== [4] 检查并补齐代码片段（region.snippet） =====');
@@ -387,86 +462,101 @@ async function run() {
   console.log(`[INFO] 源码根目录: ${sourceRoots.join(', ')}`);
   enrichSarifFiles(sarifFiles, sourceRoots);
 
-  console.log('\n===== [5] 安装 obsutil =====');
-  let obsutilPath;
-  try {
-    obsutilPath = installObsutil();
-  } catch (err) {
-    console.log(`[ERROR] ${err.message}`);
-    setOutput('result', 'failed');
-    process.exit(1);
-  }
-
-  console.log('\n===== [6] 构建 OBS 路径 =====');
-  const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
-  const now = new Date();
-  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
-  const obsKeyPrefix = `${OBS_KEY_ROOT}/${repoBaseName}/${dateStr}${workflowRunId ? '/' + workflowRunId : ''}`;
-  const downloadUrlPrefix = `${OBS_READ_ENDPOINT}/${obsKeyPrefix}`;
-  console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${obsKeyPrefix}/`);
-  console.log(`[INFO] 下载前缀: ${downloadUrlPrefix}`);
-
-  console.log('\n===== [7] 生成构建产物 JSON =====');
-  const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
-  if (!fs.existsSync(buildResultDir)) {
-    fs.mkdirSync(buildResultDir, { recursive: true });
-  }
-
-  const sarifDownloadUrls = sarifFiles.map(f => `${downloadUrlPrefix}/${path.basename(f)}`);
-  const sarifBuildings = sarifFiles.map((f, i) => {
-    const toolName = extractToolName(f);
-    return {
-      name: path.basename(f),
-      // 通用 SARIF：优先取工具名（runs[0].tool.driver.name），后端按 tool.driver.name 路由
-      type: toolName ? `${toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
-      downloadUrl: sarifDownloadUrls[i]
-    };
-  });
-
-  const isSingleFile = sarifFiles.length === 1;
-  const buildResult = {
-    type: 'build',
-    buildings: isSingleFile ? sarifBuildings[0] : sarifBuildings
-  };
-  const buildResultPath = path.join(buildResultDir, 'build-result.json');
-  fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
-
-  console.log('\n===== [8] 上传到 OBS =====');
-  const obsAuthArgs = writeObsutilConfig(obsutilPath, cred);
-
-  console.log('[INFO] 上传构建产物文件: build-result.json');
-  try {
-    // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-    execObsutil(`${obsutilPath} cp "${buildResultPath}" "obs://${OBS_BUCKET}/${obsKeyPrefix}/build-result.json" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`);
-  } catch (e1) {
-    console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
-  }
-
-  for (let i = 0; i < sarifFiles.length; i++) {
-    const sarifPath = sarifFiles[i];
-    const sarifName = path.basename(sarifPath);
-    console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifFiles.length}): ${sarifName}`);
-    try {
-      // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-      execObsutil(`${obsutilPath} cp "${sarifPath}" "obs://${OBS_BUCKET}/${obsKeyPrefix}/" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`);
-    } catch (e2) {
-      console.log(`[ERROR] ${sarifName} 上传失败: ${e2.message}`);
-      console.log('[INFO] 检查 obsutil 错误详情:');
-      try {
-        exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
-      } catch (_) {}
-      setOutput('result', 'failed');
-      process.exit(1);
+  // 注入全量代码检查统一元数据（layer/mode）到 runs[].properties（设计文档 5.1）
+  if (sarifFiles.length > 0) {
+    const sarifMeta = {};
+    if (layer) sarifMeta.layer = layer;
+    if (mode) sarifMeta.mode = mode;
+    if (Object.keys(sarifMeta).length > 0) {
+      injectSarifMetadata(sarifFiles, sarifMeta);
     }
   }
 
-  const obsUrlValue = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
+  let obsUrlValue = [];
+  if (sarifFiles.length > 0) {
+    console.log('\n===== [5] 安装 obsutil =====');
+    let obsutilPath;
+    try {
+      obsutilPath = installObsutil();
+    } catch (err) {
+      console.log(`[ERROR] ${err.message}`);
+      setOutput('result', 'failed');
+      process.exit(1);
+    }
 
-  console.log('\n================================================================');
-  console.log('[INFO] 上传成功');
-  console.log('================================================================');
+    console.log('\n===== [6] 构建 OBS 路径 =====');
+    const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
+    const obsKeyPrefix = `${OBS_KEY_ROOT}/${repoBaseName}/${dateStr}${workflowRunId ? '/' + workflowRunId : ''}`;
+    const downloadUrlPrefix = `${OBS_READ_ENDPOINT}/${obsKeyPrefix}`;
+    console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${obsKeyPrefix}/`);
+    console.log(`[INFO] 下载前缀: ${downloadUrlPrefix}`);
 
-  console.log('\n===== [9] 回调通知 =====');
+    console.log('\n===== [7] 生成构建产物 JSON =====');
+    const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
+    if (!fs.existsSync(buildResultDir)) {
+      fs.mkdirSync(buildResultDir, { recursive: true });
+    }
+
+    const sarifDownloadUrls = sarifFiles.map(f => `${downloadUrlPrefix}/${path.basename(f)}`);
+    const sarifBuildings = sarifFiles.map((f, i) => {
+      const toolName = extractToolName(f);
+      return {
+        name: path.basename(f),
+        // 通用 SARIF：优先取工具名（runs[0].tool.driver.name），后端按 tool.driver.name 路由
+        type: toolName ? `${toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
+        downloadUrl: sarifDownloadUrls[i]
+      };
+    });
+
+    const isSingleFile = sarifFiles.length === 1;
+    const buildResult = {
+      type: 'build',
+      buildings: isSingleFile ? sarifBuildings[0] : sarifBuildings
+    };
+    const buildResultPath = path.join(buildResultDir, 'build-result.json');
+    fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
+
+    console.log('\n===== [8] 上传到 OBS（失败指数退避重试，默认 3 次） =====');
+    const obsAuthArgs = writeObsutilConfig(obsutilPath, cred);
+
+    console.log('[INFO] 上传构建产物文件: build-result.json');
+    try {
+      // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
+      withRetrySync(() => execObsutil(`${obsutilPath} cp "${buildResultPath}" "obs://${OBS_BUCKET}/${obsKeyPrefix}/build-result.json" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: 'build-result.json 上传' });
+    } catch (e1) {
+      console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
+    }
+
+    for (let i = 0; i < sarifFiles.length; i++) {
+      const sarifPath = sarifFiles[i];
+      const sarifName = path.basename(sarifPath);
+      console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifFiles.length}): ${sarifName}`);
+      try {
+        // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
+        withRetrySync(() => execObsutil(`${obsutilPath} cp "${sarifPath}" "obs://${OBS_BUCKET}/${obsKeyPrefix}/" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: `${sarifName} 上传` });
+      } catch (e2) {
+        console.log(`[ERROR] ${sarifName} 上传失败: ${e2.message}`);
+        console.log('[INFO] 检查 obsutil 错误详情:');
+        try {
+          exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
+        } catch (_) {}
+        setOutput('result', 'failed');
+        process.exit(1);
+      }
+    }
+
+    obsUrlValue = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
+
+    console.log('\n================================================================');
+    console.log('[INFO] 上传成功');
+    console.log('================================================================');
+  } else {
+    console.log('\n===== [5] 跳过 OBS 上传（tool_failed 模式，无 SARIF 文件可上传） =====');
+  }
+
+  console.log('\n===== [9] 回调通知（失败指数退避重试，默认 3 次） =====');
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
     pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
@@ -477,12 +567,16 @@ async function run() {
     // 后端 DTO 为 List<String>，恒传数组兼容新旧后端（旧版无 StringOrListDeserializer）
     obsUrl: Array.isArray(obsUrlValue) ? obsUrlValue : [obsUrlValue],
     category: category || '',
+    // 全量代码检查统一元数据（设计文档 5.1/5.4）：层级 L1/L2、模式 full/incremental、工具失败标记
+    layer: layer || '',
+    mode: mode || 'full',
+    toolFailed: toolFailed || false,
     source: 'GITCODE_ACTION',
     sourceRunUrl: buildSourceRunUrl() || ''
   };
 
   try {
-    const callbackResult = await sendCallbackOidc(callbackUrl, callbackPayload, cred);
+    const callbackResult = await withRetryAsync(() => sendCallbackOidc(callbackUrl, callbackPayload, cred), { label: 'APIG 回调' });
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
     const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
@@ -495,7 +589,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, enrichRegionSnippet, enrichSarifFiles, resolveSourceFile };
+module.exports = { run, enrichRegionSnippet, enrichSarifFiles, resolveSourceFile, injectSarifMetadata, withRetrySync, withRetryAsync };
 
 if (require.main === module) {
   run().catch(err => {
