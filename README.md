@@ -16,8 +16,6 @@
 - 自动下载安装 `obsutil` 命令行工具，上传对象设置公共读权限
 - 通过 APIG 网关回调通知 OpenLibing 扫描服务（V11-HMAC-SHA256 签名 + `X-Security-Token`）
 - 失败重试：OBS 上传与 APIG 回调均采用**指数退避重试（默认 3 次）**，降低网络抖动导致的数据丢失风险
-- 统一元数据：支持注入 `layer`（L1/L2）与 `mode`（full/incremental）到回调 payload 与 SARIF `runs[].properties`
-- 工具失败标记：`tool_failed=true` 时尽力上传已产生的部分结果并上报失败元数据，不阻断失败上报（设计文档 5.4 失败语义）
 
 ## 前置要求
 
@@ -36,9 +34,6 @@ permissions:
 | category | 检查结果分类（用户手动传入，不传则为空） | 否 | - |
 | source_path | 源码根目录（可选，逗号分隔多个）。SARIF 缺少 `region.snippet` 时按 `uri`+行号读源码补齐；不传则默认在 `ATOMGIT_WORKSPACE` 下按文件名查找 | 否 | - |
 | env_type | 环境类型：`prod`（正式环境）/ `beta`（测试环境） | 否 | `prod` |
-| layer | 扫描层级：`L1`（pre-commit 层）/ `L2`（额外执行层）。随回调与 SARIF 元数据上报 openLiBing | 否 | - |
-| mode | 扫描模式：`full`（全量）/ `incremental`（增量）。增量结果需与全量基线合并展示 | 否 | `full` |
-| tool_failed | 工具执行是否崩溃/失败（`true`/`false`）。为 `true` 时标记失败元数据并尽力上传已产生的部分结果，不阻断失败上报 | 否 | `false` |
 
 > OBS 上传与 APIG 回调所需临时凭证由插件内嵌 SDK 自动换取（OIDC ID Token 自申请 + STS 换证），无需通过本插件输入，也无需在 workflow 中运行 `huaweicloud-oidc-auth` 插件。
 
@@ -81,25 +76,10 @@ OBS 桶: `openlibing-gitcode-action`
 | commitId | `ATOMGIT_SHA` |
 | obsUrl | SARIF 文件下载地址（恒为数组，匹配后端 `List<String>` DTO） |
 | category | 用户传入的 `category`，不传则为空 |
-| layer | 扫描层级（`L1`/`L2`），取自 `layer` 输入，不传则为空 |
-| mode | 扫描模式（`full`/`incremental`），取自 `mode` 输入，默认 `full` |
-| toolFailed | 工具失败标记（`true`/`false`），取自 `tool_failed` 输入，默认 `false` |
 | source | 固定值 `GITCODE_ACTION` |
 | sourceRunUrl | 根据仓库 URL 和 `ATOMGIT_RUN_ID` 拼接的 GitCode 运行链接 |
 
 OBS 上传与 APIG 回调均内置**指数退避重试（默认 3 次）**。回调失败不影响最终结果（只输出 WARN 日志），SARIF 上传成功即视为成功。
-
-### 统一元数据（layer / mode）
-
-`layer`、`mode` 除写入回调 payload 外，还会注入到 SARIF 文件 `runs[].properties`（`layer`、`mode` 字段），随结果一并落库，供 openLiBing 按分层/模式运营分析。
-
-### 工具失败标记（tool_failed）
-
-当工具执行崩溃/环境错误（设计文档 5.4 失败语义）时：
-
-- 将 `tool_failed: true` 传入上传步骤，插件会**尽力上传已产生的部分 SARIF 结果** + 失败元数据，然后正常回调；
-- 若 SARIF 完全未生成（路径不存在），插件跳过 OBS 上传，仅上报 `toolFailed=true` 的失败回调；
-- 上传步骤本身不因工具失败而失败——工具执行失败由工具所在步骤负责（流水线可配置红绿），上传插件只保证失败元数据不丢失。
 
 ## 使用示例
 
@@ -123,9 +103,6 @@ steps:
       sarif_file: ./scan-results.sarif
       category: 'security-scan'
       env_type: beta
-      layer: L2        # 全量代码检查分层：L1（pre-commit）/ L2（额外执行层）
-      mode: full       # 扫描模式：full（全量）/ incremental（增量）
-      tool_failed: 'false'  # 工具执行崩溃时置 true，尽力上传部分结果 + 失败元数据
 ```
 
 ### 多 SARIF 文件（目录模式）
@@ -189,13 +166,13 @@ steps:
 
 1. 校验输入参数（`sarif_file`、SDK 加载状态）
 2. SDK 自包含 OIDC 换证（自申请 OIDC ID Token + 调用华为云 STS 换取临时凭证）
-3. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描；`tool_failed=true` 且文件不存在时跳过上传，仅上报失败标记）
-4. 检查并补齐代码片段（`region.snippet` 缺失时按 `uri`+行号读源码补齐），并注入 `layer`/`mode` 元数据到 `runs[].properties`
+3. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描；文件不存在则报错退出）
+4. 检查并补齐代码片段（`region.snippet` 缺失时按 `uri`+行号读源码补齐）
 5. 下载并解压 `obsutil` 工具（无 SARIF 文件时跳过）
 6. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
 7. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
 8. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限，指数退避重试 3 次）
-9. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`，指数退避重试 3 次；携带 `layer`/`mode`/`toolFailed` 元数据）
+9. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`，指数退避重试 3 次）
 
 ## 注意事项
 

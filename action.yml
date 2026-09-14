@@ -1,11 +1,11 @@
 name: 'openlibing-upload-sarif'
-version: 1.1.5
+version: 1.1.8
 author: 'test-devops'
 description: '将任意工具产出的 SARIF 扫描结果上传到 OBS 并生成构建产物 JSON（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）'
 
 inputs:
   sarif_file:
-    description: 'SARIF 文件路径或所在目录（目录自动扫描所有 .sarif 文件）'
+    description: 'SARIF 文件/目录路径，逗号分隔支持多值：单个文件、多个文件、单个目录、多个目录（目录自动扫描其中所有 .sarif 文件，非递归）'
     required: true
     default: ''
     layout:
@@ -15,7 +15,7 @@ inputs:
         visible_conditions: []
         disabled_conditions: []
       validation:
-        required_message: '请输入 SARIF 文件或目录路径'
+        required_message: '请输入 SARIF 文件或目录路径（支持逗号分隔多值）'
   category:
     description: '检查结果分类（用户手动传入，不传则为空）'
     required: false
@@ -47,42 +47,6 @@ inputs:
     layout:
       type: 'input'
       label: '环境类型'
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ''
-  layer:
-    description: '扫描层级：L1（pre-commit 层）/ L2（额外执行层）。随回调与 SARIF 元数据上报 openLiBing，用于分层运营'
-    required: false
-    default: ''
-    layout:
-      type: 'input'
-      label: '扫描层级'
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ''
-  mode:
-    description: '扫描模式：full（全量）/ incremental（增量）。增量结果需与全量基线合并展示'
-    required: false
-    default: 'full'
-    layout:
-      type: 'input'
-      label: '扫描模式'
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ''
-  tool_failed:
-    description: '工具执行是否崩溃/失败（true/false）。为 true 时标记失败元数据并尽力上传已产生的部分结果，不阻断失败上报'
-    required: false
-    default: 'false'
-    layout:
-      type: 'input'
-      label: '工具失败标记'
       extend_prop:
         visible_conditions: []
         disabled_conditions: []
