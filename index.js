@@ -234,6 +234,17 @@ function extractToolName(sarifFile) {
   }
 }
 
+/**
+ * 将工具名转换为 OBS 路径前缀：{toolName}-results（如 spotbugs-results）。
+ * 工具名缺失/无法解析时兜底为通用前缀 code-arts-check-results。
+ */
+function buildToolPrefix(toolName) {
+  const name = (toolName || '').trim();
+  if (!name) return OBS_KEY_ROOT;
+  const safe = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return safe ? `${safe}-results` : OBS_KEY_ROOT;
+}
+
 // ---------- region.snippet 补齐 ----------
 
 /** shell 单参数转义（用于 find 命令的引号包裹参数，防注入） */
@@ -458,10 +469,21 @@ async function run() {
     const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
     const now = new Date();
     const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
-    const obsKeyPrefix = `${OBS_KEY_ROOT}/${repoBaseName}/${dateStr}${workflowRunId ? '/' + workflowRunId : ''}`;
-    const downloadUrlPrefix = `${OBS_READ_ENDPOINT}/${obsKeyPrefix}`;
-    console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${obsKeyPrefix}/`);
-    console.log(`[INFO] 下载前缀: ${downloadUrlPrefix}`);
+    const timePath = `${repoBaseName}/${dateStr}${workflowRunId ? '/' + workflowRunId : ''}`;
+    // 路径前缀按工具名动态拼装（如 spotbugs-results），工具名缺失时兜底 code-arts-check-results
+    const sarifUploads = sarifFiles.map((f) => {
+      const toolName = extractToolName(f);
+      const keyPrefix = `${buildToolPrefix(toolName)}/${timePath}`;
+      const name = path.basename(f);
+      return {
+        file: f,
+        name,
+        toolName,
+        keyPrefix,
+        downloadUrl: `${OBS_READ_ENDPOINT}/${keyPrefix}/${name}`
+      };
+    });
+    sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
 
     console.log('\n===== [7] 生成构建产物 JSON =====');
     const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
@@ -469,14 +491,13 @@ async function run() {
       fs.mkdirSync(buildResultDir, { recursive: true });
     }
 
-    const sarifDownloadUrls = sarifFiles.map(f => `${downloadUrlPrefix}/${path.basename(f)}`);
-    const sarifBuildings = sarifFiles.map((f, i) => {
-      const toolName = extractToolName(f);
+    const sarifDownloadUrls = sarifUploads.map(u => u.downloadUrl);
+    const sarifBuildings = sarifUploads.map((u) => {
       return {
-        name: path.basename(f),
+        name: u.name,
         // 通用 SARIF：优先取工具名（runs[0].tool.driver.name），后端按 tool.driver.name 路由
-        type: toolName ? `${toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
-        downloadUrl: sarifDownloadUrls[i]
+        type: u.toolName ? `${u.toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
+        downloadUrl: u.downloadUrl
       };
     });
 
@@ -494,20 +515,19 @@ async function run() {
     console.log('[INFO] 上传构建产物文件: build-result.json');
     try {
       // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-      withRetrySync(() => execObsutil(`${obsutilPath} cp "${buildResultPath}" "obs://${OBS_BUCKET}/${obsKeyPrefix}/build-result.json" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: 'build-result.json 上传' });
+      withRetrySync(() => execObsutil(`${obsutilPath} cp "${buildResultPath}" "obs://${OBS_BUCKET}/${OBS_KEY_ROOT}/${timePath}/build-result.json" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: 'build-result.json 上传' });
     } catch (e1) {
       console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
     }
 
-    for (let i = 0; i < sarifFiles.length; i++) {
-      const sarifPath = sarifFiles[i];
-      const sarifName = path.basename(sarifPath);
-      console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifFiles.length}): ${sarifName}`);
+    for (let i = 0; i < sarifUploads.length; i++) {
+      const u = sarifUploads[i];
+      console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
       try {
         // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-        withRetrySync(() => execObsutil(`${obsutilPath} cp "${sarifPath}" "obs://${OBS_BUCKET}/${obsKeyPrefix}/" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: `${sarifName} 上传` });
+        withRetrySync(() => execObsutil(`${obsutilPath} cp "${u.file}" "obs://${OBS_BUCKET}/${u.keyPrefix}/" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: `${u.name} 上传` });
       } catch (e2) {
-        console.log(`[ERROR] ${sarifName} 上传失败: ${e2.message}`);
+        console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
         console.log('[INFO] 检查 obsutil 错误详情:');
         try {
           exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
@@ -517,7 +537,7 @@ async function run() {
       }
     }
 
-    obsUrlValue = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
+    obsUrlValue = isSingleFile ? sarifUploads[0].downloadUrl : sarifUploads.map(u => u.downloadUrl);
 
     console.log('\n================================================================');
     console.log('[INFO] 上传成功');
@@ -553,7 +573,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, enrichRegionSnippet, enrichSarifFiles, resolveSourceFile, withRetrySync, withRetryAsync };
+module.exports = { run, enrichRegionSnippet, enrichSarifFiles, resolveSourceFile, withRetrySync, withRetryAsync, buildToolPrefix };
 
 if (require.main === module) {
   run().catch(err => {

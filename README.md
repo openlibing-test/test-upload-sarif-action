@@ -45,16 +45,17 @@ permissions:
 
 ## OBS 路径规则
 
-最终 OBS 对象键的格式为（路径前缀内置为 `code-arts-check-results`，不可配置）：
+OBS 对象键的格式为（路径前缀按工具名动态拼装）：
 
 ```
-code-arts-check-results/{repoBaseName}/{YYYYMMDD.HH}[/{workflowRunId}]/{sarifFileName}
+{toolPrefix}/{repoBaseName}/{YYYYMMDD.HH}[/{workflowRunId}]/{sarifFileName}
 ```
 
+- `toolPrefix`: 根据每个 SARIF 的 `runs[0].tool.driver.name` 动态生成（如 `spotbugs-results`、`codeql-results`）；工具名无法解析时兜底为 `code-arts-check-results`
 - `repoBaseName`: 从环境变量 `ATOMGIT_REPOSITORY` 或 `GIT_REPOSITORY` 提取仓库名
 - 时间戳: 按执行时刻生成，精确到小时
 - `workflowRunId`: 若环境变量 `ATOMGIT_RUN_ID` 存在则加入路径中，用于区分不同流水线运行
-- 支持单文件或多文件（目录模式），所有 SARIF 文件统一上传到同一前缀路径
+- 每个 SARIF 文件按其自身工具名独立拼装前缀（多工具上传时各自归位到对应前缀）
 
 OBS 桶: `openlibing-gitcode-action`
 - 写入 Endpoint: `obs.cn-southwest-2.myhuaweicloud.com`
@@ -137,7 +138,7 @@ steps:
   "buildings": {
     "name": "scan-results.sarif",
     "type": "CodeQL代码检查结果（sarif）",
-    "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/code-arts-check-results/your-repo/20250910.14/run-123/scan-results.sarif"
+    "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250910.14/run-123/scan-results.sarif"
   }
 }
 ```
@@ -151,12 +152,12 @@ steps:
     {
       "name": "codeql-java.sarif",
       "type": "CodeQL代码检查结果（sarif）",
-      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/code-arts-check-results/your-repo/20250910.14/run-123/codeql-java.sarif"
+      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250910.14/run-123/codeql-java.sarif"
     },
     {
       "name": "spotbugs.sarif",
       "type": "SpotBugs代码检查结果（sarif）",
-      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/code-arts-check-results/your-repo/20250910.14/run-123/spotbugs.sarif"
+      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/spotbugs-results/your-repo/20250910.14/run-123/spotbugs.sarif"
     }
   ]
 }
@@ -180,5 +181,5 @@ steps:
 - 插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK 自动完成换证，**无需运行 `huaweicloud-oidc-auth` 插件**
 - 前置扫描工具需产出标准 SARIF 文件，并提供 `sarif_file` 路径（文件或目录）
 - 回调通知失败仅产生 WARN，不会阻断流程，最终结果以 OBS 上传是否成功为准
-- OBS 桶 `openlibing-gitcode-action`、路径前缀 `code-arts-check-results`、APIG 回调地址均已硬编码在插件中，如有变更需修改源码
+- OBS 桶 `openlibing-gitcode-action`、路径前缀拼装规则（`{toolName}-results`，兜底 `code-arts-check-results`）、APIG 回调地址均已内置在插件中，如有变更需修改源码
 - 插件运行依赖 Bash 环境（使用 `shell: '/bin/bash'` 调用 `execSync`）

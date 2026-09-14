@@ -1,5 +1,5 @@
 name: 'openlibing-upload-sarif'
-version: 1.1.8
+version: 1.1.10
 author: 'test-devops'
 description: '将任意工具产出的 SARIF 扫描结果上传到 OBS 并生成构建产物 JSON（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）'
 
