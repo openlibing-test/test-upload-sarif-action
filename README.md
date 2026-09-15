@@ -28,19 +28,19 @@ permissions:
 
 ## 输入参数
 
-| 参数 | 说明 | 必填 | 默认值 |
-|------|------|------|--------|
-| sarif_file | SARIF 文件路径或所在目录（相对/绝对路径均可，目录自动扫描所有 `.sarif` 文件） | 是 | - |
-| category | 检查结果分类（用户手动传入，不传则为空） | 否 | - |
-| source_path | 源码根目录（可选，逗号分隔多个）。SARIF 缺少 `region.snippet` 时按 `uri`+行号读源码补齐；不传则默认在 `ATOMGIT_WORKSPACE` 下按文件名查找 | 否 | - |
-| env_type | 环境类型：`prod`（正式环境）/ `beta`（测试环境） | 否 | `prod` |
+| 参数        | 说明                                                                                                                                     | 必填 | 默认值 |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---- | ------ |
+| sarif_file  | SARIF 文件路径或所在目录（相对/绝对路径均可，目录自动扫描所有 `.sarif` 文件）                                                            | 是   | -      |
+| category    | 检查结果分类（用户手动传入，不传则为空）                                                                                                 | 否   | -      |
+| source_path | 源码根目录（可选，逗号分隔多个）。SARIF 缺少 `region.snippet` 时按 `uri`+行号读源码补齐；不传则默认在 `ATOMGIT_WORKSPACE` 下按文件名查找 | 否   | -      |
+| env_type    | 环境类型：`prod`（正式环境）/ `beta`（测试环境）                                                                                         | 否   | `prod` |
 
 > OBS 上传与 APIG 回调所需临时凭证由插件内嵌 SDK 自动换取（OIDC ID Token 自申请 + STS 换证），无需通过本插件输入，也无需在 workflow 中运行 `huaweicloud-oidc-auth` 插件。
 
 ## 输出参数
 
-| 参数 | 说明 |
-|------|------|
+| 参数   | 说明                            |
+| ------ | ------------------------------- |
 | result | 上传结果：`success` 或 `failed` |
 
 ## OBS 路径规则
@@ -59,6 +59,7 @@ OBS 对象键的格式为（路径前缀按工具名动态拼装，与 pre-commi
 - `build-result.json` 构建产物清单与 SARIF 使用同一路径（首个工具目录），不单独使用前缀
 
 OBS 桶: `openlibing-gitcode-action`
+
 - 写入 Endpoint: 由 OIDC SDK `configure()` 动态返回 region 拼装 `https://obs.{region}.myhuaweicloud.com`（与 pre-commit-action 一致，不写死区域）
 - 读取 Endpoint: `https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com`
 
@@ -68,18 +69,18 @@ OBS 桶: `openlibing-gitcode-action`
 
 回调 payload 字段:
 
-| 字段 | 来源 |
-|------|------|
-| repoUrl | `ATOMGIT_REPOSITORY_URL` |
-| pipelineId | `ATOMGIT_PIPELINE_ID` |
-| pipelineName | `PIPELINE_NAME` |
-| pipelineRunId | `ATOMGIT_RUN_ID` |
-| branch | `ATOMGIT_HEAD_REF`（MR 事件）或 `ATOMGIT_REF_NAME` |
-| commitId | `ATOMGIT_SHA` |
-| obsUrl | SARIF 文件下载地址（恒为数组，匹配后端 `List<String>` DTO） |
-| category | 用户传入的 `category`，不传则为空 |
-| source | 固定值 `GITCODE_ACTION` |
-| sourceRunUrl | 根据仓库 URL 和 `ATOMGIT_RUN_ID` 拼接的 GitCode 运行链接 |
+| 字段          | 来源                                                        |
+| ------------- | ----------------------------------------------------------- |
+| repoUrl       | `ATOMGIT_REPOSITORY_URL`                                    |
+| pipelineId    | `ATOMGIT_PIPELINE_ID`                                       |
+| pipelineName  | `PIPELINE_NAME`                                             |
+| pipelineRunId | `ATOMGIT_RUN_ID`                                            |
+| branch        | `ATOMGIT_HEAD_REF`（MR 事件）或 `ATOMGIT_REF_NAME`          |
+| commitId      | `ATOMGIT_SHA`                                               |
+| obsUrl        | SARIF 文件下载地址（恒为数组，匹配后端 `List<String>` DTO） |
+| category      | 用户传入的 `category`，不传则为空                           |
+| source        | 固定值 `GITCODE_ACTION`                                     |
+| sourceRunUrl  | 根据仓库 URL 和 `ATOMGIT_RUN_ID` 拼接的 GitCode 运行链接    |
 
 OBS 上传与 APIG 回调均内置**指数退避重试（默认 3 次）**。回调失败不影响最终结果（只输出 WARN 日志），SARIF 上传成功即视为成功。
 
@@ -103,18 +104,18 @@ steps:
     uses: openlibing-upload-sarif
     with:
       sarif_file: ./scan-results.sarif
-      category: 'security-scan'
+      category: "security-scan"
       env_type: beta
 ```
 
 ### 多 SARIF 文件（目录模式）
 
 ```yaml
-  - name: 上传多个 SARIF 文件
-    uses: openlibing-upload-sarif
-    with:
-      sarif_file: ./codeql-results/
-      source_path: ./src   # 可选：源码根目录，SARIF 缺 snippet 时自动补齐代码片段
+- name: 上传多个 SARIF 文件
+  uses: openlibing-upload-sarif
+  with:
+    sarif_file: ./codeql-results/
+    source_path: ./src # 可选：源码根目录，SARIF 缺 snippet 时自动补齐代码片段
 ```
 
 当 `sarif_file` 为目录时，插件会自动扫描目录下所有 `.sarif` 文件并逐一上传。
