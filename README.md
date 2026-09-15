@@ -13,7 +13,7 @@
 - 自动识别 SARIF 文件中的工具名（`runs[0].tool.driver.name`）用于构建产物类型，后端按 `tool.driver.name` 路由
 - 自动补齐 `region.snippet`（代码上下文）：SARIF 缺少代码片段信息时，按 `uri` + 行号读取源码补齐，提升后端告警可读性
 - OIDC 免静态凭证：插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK，自申请 OIDC ID Token 并调用华为云 STS 换证，OBS 上传与 APIG 回调全程使用临时凭证
-- 自动下载安装 `obsutil` 命令行工具，上传对象设置公共读权限
+- 内嵌 `esdk-obs-nodejs` SDK 上传 OBS，上传对象设置公共读权限（无需下载 obsutil）
 - 通过 APIG 网关回调通知 OpenLibing 扫描服务（V11-HMAC-SHA256 签名 + `X-Security-Token`）
 - 失败重试：OBS 上传与 APIG 回调均采用**指数退避重试（默认 3 次）**，降低网络抖动导致的数据丢失风险
 
@@ -169,7 +169,7 @@ steps:
 2. SDK 自包含 OIDC 换证（自申请 OIDC ID Token + 调用华为云 STS 换取临时凭证）
 3. 检查 SARIF 文件存在（自动尝试在 workspace 与 Git 目录中查找，支持目录模式自动扫描；文件不存在则报错退出）
 4. 检查并补齐代码片段（`region.snippet` 缺失时按 `uri`+行号读源码补齐）
-5. 下载并解压 `obsutil` 工具（无 SARIF 文件时跳过）
+5. 初始化 `esdk-obs-nodejs` 客户端（OIDC 临时凭证，等待签名上下文就绪）
 6. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
 7. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
 8. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限，指数退避重试 3 次）

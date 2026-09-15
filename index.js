@@ -9,6 +9,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const ObsClient = require('esdk-obs-nodejs');
 
 // OIDC SDK：APIG V11-HMAC-SHA256 签名 + HTTPS 请求 + 自包含 OIDC 换证。
 // getCredentials() 通过 Actions 兼容流水线环境变量（ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN）
@@ -38,6 +39,7 @@ const OIDC_BETA_BASE = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwe
 const OBS_KEY_ROOT = 'code-arts-check-results';
 const OBS_BUCKET = 'openlibing-gitcode-action';
 const OBS_WRITE_ENDPOINT = 'obs.cn-southwest-2.myhuaweicloud.com';
+const OBS_SERVER = `https://${OBS_WRITE_ENDPOINT}`; // SDK 上传端点
 const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
 
 const SARIF_EXT = '.sarif';
@@ -70,24 +72,12 @@ function setOutput(key, value) {
   console.log(`[OUTPUT] ${key}=${value}`);
 }
 
-function exec(cmd) {
-  console.log(`> ${cmd}`);
-  execSync(cmd, { stdio: 'inherit', shell: '/bin/bash' });
-}
-
 function execCapture(cmd) {
   try {
     return execSync(cmd, { encoding: 'utf-8', shell: '/bin/bash' }).trim();
   } catch (e) {
     return '';
   }
-}
-
-/** 执行 obsutil 命令，日志对 AK/SK/SecurityToken（-i=/-k=/-t=）脱敏，避免临时凭证落日志 */
-function execObsutil(cmd) {
-  const masked = cmd.replace(/(-i="[^"]*"|-k="[^"]*"|-t="[^"]*")/g, (m) => m.split('=')[0] + '="***"');
-  console.log(`> ${masked}`);
-  execSync(cmd, { stdio: 'inherit', shell: '/bin/bash' });
 }
 
 /**
@@ -192,34 +182,6 @@ function resolveBranch() {
   return eventName === 'mr'
     ? (process.env.ATOMGIT_HEAD_REF || '')
     : (process.env.ATOMGIT_REF_NAME || '');
-}
-
-/** 下载并解压 obsutil（优先 wget，失败回退 curl），返回可执行文件路径 */
-function installObsutil() {
-  const tmpDir = os.tmpdir();
-  exec(`wget -q https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz -O ${tmpDir}/obsutil_linux_amd64.tar.gz 2>/dev/null || curl -sL https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz -o ${tmpDir}/obsutil_linux_amd64.tar.gz`);
-  exec(`cd ${tmpDir} && tar zxf obsutil_linux_amd64.tar.gz --strip-components=1 2>/dev/null || true`);
-  exec(`chmod 755 ${tmpDir}/obsutil 2>/dev/null || true`);
-  const obsutilPath = execCapture(`which obsutil 2>/dev/null || find ${tmpDir} -name "obsutil" -type f 2>/dev/null | head -1`);
-  if (!obsutilPath) {
-    throw new Error('obsutil 安装失败');
-  }
-  console.log(`[OK] obsutil 路径: ${obsutilPath}`);
-  return obsutilPath;
-}
-
-/** 将 OIDC 临时凭证写入 obsutil 独立配置文件，返回上传命令的鉴权参数 */
-function writeObsutilConfig(obsutilPath, cred) {
-  const configPath = path.join(os.tmpdir(), 'obsutil-oidc-config');
-  try {
-    exec(`touch ${configPath}`); // -config= 指向的文件必须已存在（obsutil 只更新不创建）
-    execObsutil(`${obsutilPath} config -i="${cred.accessKeyId}" -k="${cred.secretAccessKey}" -t="${cred.securityToken}" -e="${OBS_WRITE_ENDPOINT}" -config="${configPath}"`);
-  } catch (err) {
-    console.log(`[ERROR] 写入 obsutil 配置文件失败: ${err.message}`);
-    setOutput('result', 'failed');
-    process.exit(1);
-  }
-  return `-config="${configPath}"`;
 }
 
 /** 从 SARIF 文件提取工具名（runs[0].tool.driver.name），用于构建产物类型；解析失败返回空 */
@@ -455,17 +417,7 @@ async function run() {
 
   let obsUrlValue = [];
   if (sarifFiles.length > 0) {
-    console.log('\n===== [5] 安装 obsutil =====');
-    let obsutilPath;
-    try {
-      obsutilPath = installObsutil();
-    } catch (err) {
-      console.log(`[ERROR] ${err.message}`);
-      setOutput('result', 'failed');
-      process.exit(1);
-    }
-
-    console.log('\n===== [6] 构建 OBS 路径 =====');
+    console.log('\n===== [5] 构建 OBS 路径 =====');
     const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
     const now = new Date();
     const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
@@ -485,7 +437,7 @@ async function run() {
     });
     sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
 
-    console.log('\n===== [7] 生成构建产物 JSON =====');
+    console.log('\n===== [6] 生成构建产物 JSON =====');
     const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
     if (!fs.existsSync(buildResultDir)) {
       fs.mkdirSync(buildResultDir, { recursive: true });
@@ -509,13 +461,35 @@ async function run() {
     const buildResultPath = path.join(buildResultDir, 'build-result.json');
     fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
 
-    console.log('\n===== [8] 上传到 OBS（失败指数退避重试，默认 3 次） =====');
-    const obsAuthArgs = writeObsutilConfig(obsutilPath, cred);
+    console.log('\n===== [7] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
+    // esdk-obs-nodejs 的 initFactory 为 fire-and-forget（内部 await refresh 后才设置签名上下文），
+    // 构造后立即 putObject 会读到 null signatureContext（Cannot read properties of null (reading 'signature')），
+    // 此处让出一个微任务等待初始化完成。
+    const client = new ObsClient({
+      access_key_id: cred.accessKeyId,
+      secret_access_key: cred.secretAccessKey,
+      security_token: cred.securityToken,
+      server: OBS_SERVER
+    });
+    await Promise.resolve();
+
+    // putObject 结果校验：HTTP 状态 2xx 视为成功，否则抛错（供 withRetryAsync 重试）
+    const assertUploadOk = (result, label) => {
+      const msg = (result && result.CommonMsg) || {};
+      if (!(msg.Status >= 200 && msg.Status < 300)) {
+        throw new Error(`${label} 上传失败 (${msg.Status})${msg.Code ? ' [' + msg.Code + ']' : ''}: ${msg.Message || '未知错误'}`);
+      }
+    };
 
     console.log('[INFO] 上传构建产物文件: build-result.json');
     try {
-      // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-      withRetrySync(() => execObsutil(`${obsutilPath} cp "${buildResultPath}" "obs://${OBS_BUCKET}/${OBS_KEY_ROOT}/${timePath}/build-result.json" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: 'build-result.json 上传' });
+      // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
+      await withRetryAsync(() => client.putObject({
+        Bucket: OBS_BUCKET,
+        Key: `${OBS_KEY_ROOT}/${timePath}/build-result.json`,
+        SourceFile: buildResultPath,
+        ACL: 'public-read'
+      }).then(r => assertUploadOk(r, 'build-result.json')), { label: 'build-result.json 上传' });
     } catch (e1) {
       console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
     }
@@ -524,18 +498,20 @@ async function run() {
       const u = sarifUploads[i];
       console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
       try {
-        // -acl=public-read：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-        withRetrySync(() => execObsutil(`${obsutilPath} cp "${u.file}" "obs://${OBS_BUCKET}/${u.keyPrefix}/" -f -acl=public-read -e="${OBS_WRITE_ENDPOINT}" ${obsAuthArgs}`), { label: `${u.name} 上传` });
+        // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
+        await withRetryAsync(() => client.putObject({
+          Bucket: OBS_BUCKET,
+          Key: `${u.keyPrefix}/${u.name}`,
+          SourceFile: u.file,
+          ACL: 'public-read'
+        }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
       } catch (e2) {
         console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
-        console.log('[INFO] 检查 obsutil 错误详情:');
-        try {
-          exec(`cat /home/octopus/.obsutil_output/*.log 2>/dev/null | tail -50`);
-        } catch (_) {}
         setOutput('result', 'failed');
         process.exit(1);
       }
     }
+    await client.close();
 
     obsUrlValue = isSingleFile ? sarifUploads[0].downloadUrl : sarifUploads.map(u => u.downloadUrl);
 
