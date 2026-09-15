@@ -25,8 +25,9 @@ const ObsClient = __nccwpck_require__(1728);
 let V11Signer = null;
 let sendRequest = null;
 let getCredentials = null;
+let configure = null;
 try {
-  ({ V11Signer, sendRequest, getCredentials } = __nccwpck_require__(8620));
+  ({ V11Signer, sendRequest, getCredentials, configure } = __nccwpck_require__(8620));
 } catch (e) {
   console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，请重新构建 dist 后重试');
 }
@@ -43,10 +44,9 @@ const OIDC_PROD_BASE = 'https://apig.openlibing.com';
 const OIDC_BETA_BASE = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
 
 // OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
+// 上传端点 server 由 OIDC SDK configure 动态返回 region（与 pre-commit-action 一致），不在此写死
 const OBS_KEY_ROOT = 'code-arts-check-results';
 const OBS_BUCKET = 'openlibing-gitcode-action';
-const OBS_WRITE_ENDPOINT = 'obs.cn-southwest-2.myhuaweicloud.com';
-const OBS_SERVER = `https://${OBS_WRITE_ENDPOINT}`; // SDK 上传端点
 const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
 
 const SARIF_EXT = '.sarif';
@@ -428,7 +428,8 @@ async function run() {
     const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
     const now = new Date();
     const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
-    const timePath = `${repoBaseName}/${dateStr}${workflowRunId ? '/' + workflowRunId : ''}`;
+    // 统一路径结构：{前缀}/{仓库名}/{yyyyMMdd}.{HH}/{runId|manual}/{文件名}
+    const timePath = `${repoBaseName}/${dateStr}/${workflowRunId || 'manual'}`;
     // 路径前缀按工具名动态拼装（如 spotbugs-results），工具名缺失时兜底 code-arts-check-results
     const sarifUploads = sarifFiles.map((f) => {
       const toolName = extractToolName(f);
@@ -450,6 +451,9 @@ async function run() {
       fs.mkdirSync(buildResultDir, { recursive: true });
     }
 
+    // 构建产物清单与 SARIF 使用同一路径（首个工具目录），不再单独使用 code-arts-check-results 前缀
+    const buildResultKey = `${sarifUploads[0].keyPrefix}/build-result.json`;
+
     const sarifDownloadUrls = sarifUploads.map(u => u.downloadUrl);
     const sarifBuildings = sarifUploads.map((u) => {
       return {
@@ -469,6 +473,10 @@ async function run() {
     fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
 
     console.log('\n===== [7] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
+    // server 由 OIDC SDK configure 动态返回 region（与 pre-commit-action 一致），
+    // 避免把区域写死；临时凭证换取后构造客户端。
+    const { region } = configure({});
+    const server = `https://obs.${region}.myhuaweicloud.com`;
     // esdk-obs-nodejs 的 initFactory 为 fire-and-forget（内部 await refresh 后才设置签名上下文），
     // 构造后立即 putObject 会读到 null signatureContext（Cannot read properties of null (reading 'signature')），
     // 此处让出一个微任务等待初始化完成。
@@ -476,7 +484,7 @@ async function run() {
       access_key_id: cred.accessKeyId,
       secret_access_key: cred.secretAccessKey,
       security_token: cred.securityToken,
-      server: OBS_SERVER
+      server
     });
     await Promise.resolve();
 
@@ -493,7 +501,7 @@ async function run() {
       // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
       await withRetryAsync(() => client.putObject({
         Bucket: OBS_BUCKET,
-        Key: `${OBS_KEY_ROOT}/${timePath}/build-result.json`,
+        Key: buildResultKey,
         SourceFile: buildResultPath,
         ACL: 'public-read'
       }).then(r => assertUploadOk(r, 'build-result.json')), { label: 'build-result.json 上传' });

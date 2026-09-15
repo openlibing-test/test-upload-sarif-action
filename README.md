@@ -45,20 +45,21 @@ permissions:
 
 ## OBS 路径规则
 
-OBS 对象键的格式为（路径前缀按工具名动态拼装）：
+OBS 对象键的格式为（路径前缀按工具名动态拼装，与 pre-commit-action 的 `pre-commit-results` 前缀共用同一路径结构）：
 
 ```
-{toolPrefix}/{repoBaseName}/{YYYYMMDD.HH}[/{workflowRunId}]/{sarifFileName}
+{toolPrefix}/{repoBaseName}/{YYYYMMDD.HH}/{workflowRunId|manual}/{sarifFileName}
 ```
 
 - `toolPrefix`: 根据每个 SARIF 的 `runs[0].tool.driver.name` 动态生成（如 `spotbugs-results`、`codeql-results`）；工具名无法解析时兜底为 `code-arts-check-results`
 - `repoBaseName`: 从环境变量 `ATOMGIT_REPOSITORY` 或 `GIT_REPOSITORY` 提取仓库名
-- 时间戳: 按执行时刻生成，精确到小时
-- `workflowRunId`: 若环境变量 `ATOMGIT_RUN_ID` 存在则加入路径中，用于区分不同流水线运行
+- 时间戳: 按执行时刻生成，精确到小时（`yyyyMMdd.HH`，与 pre-commit-action 一致）
+- `workflowRunId`: 取 `ATOMGIT_RUN_ID`；缺失时用 `manual` 兜底，保证路径层级固定
 - 每个 SARIF 文件按其自身工具名独立拼装前缀（多工具上传时各自归位到对应前缀）
+- `build-result.json` 构建产物清单与 SARIF 使用同一路径（首个工具目录），不单独使用前缀
 
 OBS 桶: `openlibing-gitcode-action`
-- 写入 Endpoint: `obs.cn-southwest-2.myhuaweicloud.com`
+- 写入 Endpoint: 由 OIDC SDK `configure()` 动态返回 region 拼装 `https://obs.{region}.myhuaweicloud.com`（与 pre-commit-action 一致，不写死区域）
 - 读取 Endpoint: `https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com`
 
 ## 回调通知
