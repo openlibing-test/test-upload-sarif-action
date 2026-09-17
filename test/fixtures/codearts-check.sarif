@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "CodeArts Check",
+          "semanticVersion": "",
+          "rules": [
+            {
+              "id": "468672036d6b11edab16fa163e0fa374",
+              "properties": {
+                "name": "G.CMT.05 文件头注释应该包含版权许可信息"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Missing file header comment at first line or file header comment not under the kia mark."
+              }
+            },
+            {
+              "id": "d5d9efe76d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.FMT.05 在条件语句和循环块中应该使用大括号"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Conditional statements and loop blocks must use braces."
+              }
+            },
+            {
+              "id": "cef979d86d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.CMT.01 public或protected修饰的元素应添加Javadoc注释"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Missing javadoc on 'HelloWorld' which is public or protected"
+              }
+            },
+            {
+              "id": "487b97346d6b11edab16fa163e0fa374",
+              "properties": {
+                "name": "G.NAM.08 布尔型变量建议以表达是非意义的动词开头"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Boolean 'flag' should start with 'is', 'has', 'can' or 'should'"
+              }
+            },
+            {
+              "id": "ca8bc1876d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.LOG.01 记录日志应该使用Facade模式的日志框架"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "Do not use System.out or System.err to log messages"
+              }
+            },
+            {
+              "id": "cf7798ae6d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.CMT.02 顶层public类的Javadoc应该包含功能说明和创建日期/版本信息"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Missing javadoc description"
+              }
+            },
+            {
+              "id": "c4ab48576d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.CTL.01 不要在控制性条件表达式中执行赋值操作或执行复杂的条件判断"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "Do not compare expression with 'true'"
+              }
+            },
+            {
+              "id": "d94990256d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.FMT.12 减少不必要的空行，保持代码紧凑"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Reduce unnecessary blank lines to keep code compact."
+              }
+            },
+            {
+              "id": "d2e871216d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.FMT.02 一个源文件按顺序包含版权、package、import、顶层类，且用空行分隔"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Do not use '*' in import declaration"
+              }
+            },
+            {
+              "id": "c71c42ab6d6411edab16fa163e0fa374",
+              "properties": {
+                "name": "G.ERR.02 不要直接捕获异常的基类Throwable、Exception、RuntimeException"
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "Do not catch 'Exception' or 'RuntimeException'"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "468672036d6b11edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Missing file header comment at first line or file header comment not under the kia mark."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 1,
+                  "snippet": {
+                    "text": "import java.util.*;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "d5d9efe76d6411edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Conditional statements and loop blocks must use braces."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 18,
+                  "snippet": {
+                    "text": "        int c = 3;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "cef979d86d6411edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Missing javadoc on 'HelloWorld' which is public or protected"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 3,
+                  "snippet": {
+                    "text": "import java.util.*;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "487b97346d6b11edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Boolean 'flag' should start with 'is', 'has', 'can' or 'should'"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 27,
+                  "snippet": {
+                    "text": "        try {"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "ca8bc1876d6411edab16fa163e0fa374",
+          "level": "warning",
+          "message": {
+            "text": "Do not use System.out or System.err to log messages"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 6,
+                  "snippet": {
+                    "text": "import java.util.*;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "ca8bc1876d6411edab16fa163e0fa374",
+          "level": "warning",
+          "message": {
+            "text": "Do not use System.out or System.err to log messages"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 18,
+                  "snippet": {
+                    "text": "        int c = 3;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "ca8bc1876d6411edab16fa163e0fa374",
+          "level": "warning",
+          "message": {
+            "text": "Do not use System.out or System.err to log messages"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 29,
+                  "snippet": {
+                    "text": "        } catch (Exception ex) {      // 7. 捕获过于宽泛"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "cf7798ae6d6411edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Missing javadoc description"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 2,
+                  "snippet": {
+                    "text": "import java.util.*;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "c4ab48576d6411edab16fa163e0fa374",
+          "level": "warning",
+          "message": {
+            "text": "Do not compare expression with 'true'"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 28,
+                  "snippet": {
+                    "text": "            int x = 10 / 0;           // 6. 明显异常"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "d94990256d6411edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Reduce unnecessary blank lines to keep code compact."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 4,
+                  "snippet": {
+                    "text": "import java.util.*;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "d94990256d6411edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Reduce unnecessary blank lines to keep code compact."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 33,
+                  "snippet": {
+                    "text": "        if (flag == true) {           // 9. Boolean 比较写法不规范"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "d2e871216d6411edab16fa163e0fa374",
+          "level": "note",
+          "message": {
+            "text": "Do not use '*' in import declaration"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 1,
+                  "snippet": {
+                    "text": "import java.util.*;"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "c71c42ab6d6411edab16fa163e0fa374",
+          "level": "warning",
+          "message": {
+            "text": "Do not catch 'Exception' or 'RuntimeException'"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "java-test.java"
+                },
+                "region": {
+                  "startLine": 24
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

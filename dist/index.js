@@ -18,7 +18,12 @@ const path = __nccwpck_require__(6928);
 const os = __nccwpck_require__(857);
 const ObsClient = __nccwpck_require__(1728);
 
-// OIDC SDK：APIG V11-HMAC-SHA256 签名 + HTTPS 请求 + 自包含 OIDC 换证。
+const CodeCheckReportParser = __nccwpck_require__(9147);
+const SarifGenerator = __nccwpck_require__(9069);
+const SarifNormalizer = __nccwpck_require__(5301);
+const CodeArtsCheckApi = __nccwpck_require__(7739);
+
+// OIDC 签名 SDK：APIG V11-HMAC-SHA256 签名 + HTTPS 请求 + 自包含 OIDC 换证。
 // getCredentials() 通过 Actions 兼容流水线环境变量（ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN）
 // 自申请 OIDC ID Token，再调用华为云 STS AssumeAgencyWithOIDC 换取临时 AK/SK/SecurityToken，
 // 无需在 workflow 中额外运行 huaweicloud-oidc-auth 插件（仅需声明 permissions: id-token: write）。
@@ -44,12 +49,15 @@ const OIDC_PROD_BASE = 'https://apig.openlibing.com';
 const OIDC_BETA_BASE = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
 
 // OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
-// 上传端点 server 由 OIDC SDK configure 动态返回 region（与 pre-commit-action 一致），不在此写死
-const OBS_KEY_ROOT = 'code-arts-check-results';
+// 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
+const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
 const OBS_BUCKET = 'openlibing-gitcode-action';
 const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
 
-const SARIF_EXT = '.sarif';
+const REPORT_EXT = ['.md', '.markdown'];
+const SARIF_EXT = ['.sarif'];
+// CodeArts region 解析优先级：input > codeCheck_task_url > 环境变量 > 默认 cn-north-4
+const REGION_ENV_CANDIDATES = ['CODEARTS_REGION', 'CODEARTS_IAM_REGION', 'CLOUD_REGION', 'CLOUD_REGION_ID', 'REGION_ID'];
 
 // ---------- 通用辅助 ----------
 
@@ -89,7 +97,7 @@ function execCapture(cmd) {
 
 /**
  * 同步指数退避重试：默认 3 次，失败后 sleep(2^(n-1) 秒) 再试。
- * 用于 OBS 上传等同步命令，降低网络抖动导致的数据丢失风险（设计文档 5.3）。
+ * 用于 OBS 上传等同步命令，降低网络抖动导致的数据丢失风险。
  */
 function withRetrySync(fn, { retries = 3, label = '' } = {}) {
   let lastErr;
@@ -109,7 +117,7 @@ function withRetrySync(fn, { retries = 3, label = '' } = {}) {
 
 /**
  * 异步指数退避重试：默认 3 次，失败后 sleep(2^(n-1) * 1000ms) 再试。
- * 用于 APIG 回调等异步请求（设计文档 5.3）。
+ * 用于 APIG 回调、OBS SDK 上传等异步请求。
  */
 async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
   let lastErr;
@@ -130,6 +138,155 @@ async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
 /** 日志脱敏：IP 地址替换为占位符 */
 function sanitizePath(pathStr) {
   return pathStr.replace(/(\d+\.\d+\.\d+\.\d+)/g, '[IP_ADDRESS]');
+}
+
+function resolveRegion() {
+  const fromInput = getInput('region');
+  if (fromInput) {
+    console.log(`[INFO] 使用 region（input）: ${fromInput}`);
+    return fromInput;
+  }
+  for (const name of REGION_ENV_CANDIDATES) {
+    const val = process.env[name];
+    if (val && val.trim()) {
+      console.log(`[INFO] 使用 region（环境变量 ${name}）: ${val.trim()}`);
+      return val.trim();
+    }
+  }
+  console.log('[INFO] 使用 region（默认）: cn-north-4');
+  return 'cn-north-4';
+}
+
+// ---------- 报告定位与转换 ----------
+
+function isReportFile(name) {
+  const lower = name.toLowerCase();
+  return REPORT_EXT.some((ext) => lower.endsWith(ext));
+}
+
+function isSarifFile(name) {
+  const lower = name.toLowerCase();
+  return SARIF_EXT.some((ext) => lower.endsWith(ext));
+}
+
+function hasWildcard(p) {
+  return /[*?]/.test(p);
+}
+
+/** 通配符匹配：* 匹配任意字符（含空），? 匹配单个字符 */
+function globMatch(pattern, name) {
+  const regexStr = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${regexStr}$`).test(name);
+}
+
+/** 在目录中按文件名通配符匹配报告文件 */
+function globReportFiles(patternPath) {
+  const dir = path.dirname(patternPath);
+  const namePattern = path.basename(patternPath);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch (e) {
+    return [];
+  }
+  return entries
+    .filter((entry) => (isReportFile(entry) || isSarifFile(entry)) && globMatch(namePattern, entry))
+    .map((entry) => path.join(dir, entry));
+}
+
+/** 扫描目录下所有报告/SARIF 文件 */
+function scanReportDir(dirPath) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dirPath);
+  } catch (e) {
+    return [];
+  }
+  return entries
+    .filter((entry) => isReportFile(entry) || isSarifFile(entry))
+    .map((entry) => path.join(dirPath, entry));
+}
+
+/** 尝试解析单个候选路径（通配符/目录/文件），未命中返回 null */
+function tryResolveCandidate(candidate) {
+  if (hasWildcard(candidate)) {
+    const matched = globReportFiles(candidate);
+    return matched.length > 0 ? { kind: 'glob', files: matched } : null;
+  }
+  if (!fs.existsSync(candidate)) return null;
+  const stat = fs.statSync(candidate);
+  if (stat.isDirectory()) {
+    const files = scanReportDir(candidate);
+    return files.length > 0 ? { kind: 'dir', files, dir: candidate } : null;
+  }
+  return { kind: 'file', files: [candidate] };
+}
+
+/**
+ * 定位报告文件：支持单文件 / 目录 / 通配符（如 /tmp/step_summary_*.md）
+ * 依次尝试：原路径 -> WORKSPACE 拼接 -> Git 目录拼接。
+ * @returns {{kind: 'glob'|'dir'|'file', files: string[], dir?: string}|null}
+ */
+function resolveReportFiles(reportFile, workspace) {
+  const candidates = [reportFile];
+  if (workspace) {
+    candidates.push(path.join(workspace, reportFile));
+  }
+  for (const candidate of candidates) {
+    const found = tryResolveCandidate(candidate);
+    if (found) return found;
+  }
+  const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  if (gitDir) {
+    const found = tryResolveCandidate(path.join(path.dirname(gitDir), reportFile));
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * 转换单个文件为 SARIF 文件。
+ *
+ * 按输入类型分发：
+ * - 原生 SARIF（.sarif，如 CodeArts Check 导出）→ SarifNormalizer 规范化（工具名统一为
+ *   CodeArtsCheck（无空格）、补齐 partialFingerprints），保证 openlibing-codecheck 可消费；
+ * - Markdown 报告（.md/.markdown）→ CodeCheckReportParser 解析后由 SarifGenerator 生成。
+ */
+function convertReportFile(reportFile, outDir) {
+  let sarif;
+  let issueCount;
+  const warnings = [];
+  if (isSarifFile(reportFile)) {
+    const normalized = SarifNormalizer.normalizeFile(reportFile);
+    sarif = normalized.sarif;
+    issueCount = normalized.issueCount;
+    warnings.push(...normalized.warnings);
+  } else {
+    const parsed = CodeCheckReportParser.parseFile(reportFile);
+    sarif = SarifGenerator.generate(parsed);
+    issueCount = parsed.issues.length;
+    warnings.push(...parsed.warnings);
+  }
+  const outName = path.basename(reportFile).replace(/\.(md|markdown|sarif)$/i, '') + '.sarif';
+  const outPath = path.join(outDir, outName);
+  fs.writeFileSync(outPath, JSON.stringify(sarif, null, 2), 'utf-8');
+  return { outPath, issueCount, warnings };
+}
+
+/** 批量转换报告文件，返回生成的 SARIF 文件路径列表 */
+function convertReports(reportFiles, outDir) {
+  const sarifFiles = [];
+  for (const reportFile of reportFiles) {
+    const { outPath, issueCount, warnings } = convertReportFile(reportFile, outDir);
+    warnings.forEach((w) => console.log(`[WARN] ${path.basename(reportFile)}: ${w}`));
+    console.log(`[OK] 转换完成: ${path.basename(reportFile)} -> ${path.basename(outPath)} (${issueCount} 条问题)`);
+    sarifFiles.push(outPath);
+  }
+  return sarifFiles;
 }
 
 // ---------- OIDC 回调 ----------
@@ -168,6 +325,29 @@ async function sendCallbackOidc(url, payload, cred) {
 
 // ---------- 主流程辅助 ----------
 
+/** 读取并解析 CodeArts 任务参数（codecheck_task_url 未显式配置时兜底） */
+function readTaskParams() {
+  let projectId = getInput('project_id');
+  let taskName = getInput('task_name');
+  let taskId = getInput('task_id');
+  let region = getInput('region');
+  const taskUrl = getInput('codecheck_task_url');
+
+  if (taskUrl) {
+    const parsed = CodeArtsCheckApi.parseTaskUrl(taskUrl);
+    if (parsed) {
+      projectId = projectId || parsed.projectId;
+      taskId = taskId || parsed.taskId;
+      region = region || parsed.region;
+      console.log(`[INFO] 从 codeCheck_task_url 解析 project_id/task_id/region/jobId: ${parsed.projectId} / ${parsed.taskId} / ${parsed.region} / ${parsed.jobId}`);
+    } else {
+      console.log(`[WARN] 无法从 codeCheck_task_url 解析参数: ${taskUrl}`);
+    }
+  }
+  region = region || resolveRegion();
+  return { projectId, taskName, taskId, region };
+}
+
 /** 构造 Actions 运行页 URL：https://gitcode.com/{owner}/{repo}/actions/runs/{runId} */
 function buildSourceRunUrl() {
   const repoUrl = (process.env.ATOMGIT_REPOSITORY_URL || '').trim();
@@ -191,7 +371,7 @@ function resolveBranch() {
     : (process.env.ATOMGIT_REF_NAME || '');
 }
 
-/** 从 SARIF 文件提取工具名（runs[0].tool.driver.name），用于构建产物类型；解析失败返回空 */
+/** 从 SARIF 文件提取工具名（runs[0].tool.driver.name），用于构建产物类型与 OBS 路径前缀；解析失败返回空 */
 function extractToolName(sarifFile) {
   try {
     const data = JSON.parse(fs.readFileSync(sarifFile, 'utf-8'));
@@ -204,7 +384,7 @@ function extractToolName(sarifFile) {
 }
 
 /**
- * 将工具名转换为 OBS 路径前缀：{toolName}-results（如 spotbugs-results）。
+ * 将工具名转换为 OBS 路径前缀：{toolName}-results（如 CodeArtsCheck -> codeartscheck-results）。
  * 工具名缺失/无法解析时兜底为通用前缀 code-arts-check-results。
  */
 function buildToolPrefix(toolName) {
@@ -308,14 +488,63 @@ function enrichSarifFiles(sarifFiles, sourceRoots) {
   }
 }
 
+/** 收集本地 sarif_file 输入指向的 SARIF 文件（单文件/多文件/目录，逗号分隔） */
+function collectSarifFiles(sarifFile, workspace) {
+  const sarifFiles = [];
+  const missingPaths = [];
+  const sarifPaths = sarifFile.split(',').map(s => s.trim()).filter(Boolean);
+  for (const rawPath of sarifPaths) {
+    let p = rawPath;
+    if (!fs.existsSync(p)) {
+      p = path.join(workspace, rawPath);
+    }
+    if (!fs.existsSync(p)) {
+      const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+      if (gitDir) {
+        p = path.join(path.dirname(gitDir), rawPath);
+      }
+    }
+    if (!fs.existsSync(p)) {
+      missingPaths.push(rawPath);
+      continue;
+    }
+    if (fs.statSync(p).isDirectory()) {
+      console.log(`[INFO] 输入为目录: ${p}，扫描其中所有 .sarif 文件`);
+      const entries = fs.readdirSync(p);
+      const found = [];
+      for (const entry of entries) {
+        if (entry.toLowerCase().endsWith('.sarif')) {
+          found.push(path.join(p, entry));
+        }
+      }
+      if (found.length === 0) {
+        console.log(`[WARN] 目录中未找到 .sarif 文件: ${p}`);
+      }
+      sarifFiles.push(...found);
+    } else {
+      sarifFiles.push(p);
+      console.log(`[OK] SARIF 文件: ${p}`);
+    }
+  }
+  return { sarifFiles, missingPaths };
+}
+
 // ---------- 主流程 ----------
 
 async function run() {
+  const reportFile = getInput('report_file');
   const sarifFile = getInput('sarif_file');
   const category = getInput('category');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const isBetaEnv = envType === 'beta';
   const workflowRunId = process.env.ATOMGIT_RUN_ID || '';
+
+  // CodeArts Check API 凭证：优先 runner 注入的 IAM AK/SK（老方式），兜底 SDK 换取的 OIDC 临时凭证。
+  // defects-detail 接口暂不支持 OIDC（STS + X-Security-Token）调用，老 AK/SK 是首选。
+  const legacyAk = process.env.CODEARTS_IAM_AK || '';
+  const legacySk = process.env.CODEARTS_IAM_SK || '';
+
+  const { projectId, taskName, taskId, region } = readTaskParams();
 
   const callbackUrl = (isBetaEnv ? OIDC_BETA_BASE : OIDC_PROD_BASE) + OIDC_API_PREFIX + CALLBACK_PATH;
 
@@ -323,14 +552,16 @@ async function run() {
   console.log(`[INFO] 环境类型: ${isBetaEnv ? 'beta (测试环境)' : 'prod (正式环境)'}`);
   console.log('[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）');
   console.log(`[INFO] 回调地址: ${callbackUrl}`);
+  console.log(`[INFO] CodeArts Check API 凭证: ${legacyAk && legacySk ? 'runner 注入 IAM AK/SK（老方式）' : 'OIDC 临时凭证（兜底）'}`);
 
   console.log('\n===== [1] 校验参数 =====');
-  if (!sarifFile) {
-    console.log('[ERROR] sarif_file 参数不能为空');
+  const apiReady = Boolean(legacyAk && legacySk && projectId && taskId);
+  if (!reportFile && !sarifFile && !apiReady) {
+    console.log('[ERROR] 缺少数据源：report_file（CodeArts 报告）或 sarif_file（本地 SARIF）或 CodeArts API 参数（project_id + task_id，可通过 codecheck_task_url 自动解析）至少配置其一');
     setOutput('result', 'failed');
     process.exit(1);
   }
-  if (!V11Signer || !sendRequest || !getCredentials) {
+  if (!V11Signer || !sendRequest || !getCredentials || !configure) {
     console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，无法进行 OIDC 认证');
     setOutput('result', 'failed');
     process.exit(1);
@@ -352,60 +583,76 @@ async function run() {
   }
   console.log('[OK] 临时凭证获取成功（OIDC ID Token 自申请 + STS 换证）');
 
-  console.log('\n===== [3] 检查 SARIF 文件 =====');
+  const codeartsAk = legacyAk || cred.accessKeyId;
+  const codeartsSk = legacySk || cred.secretAccessKey;
+  const codeartsToken = legacyAk && legacySk ? '' : cred.securityToken;
+
+  const tmpDir = os.tmpdir();
+  const convertOutDir = path.join(tmpDir, 'sarif-convert-output');
+  fs.mkdirSync(convertOutDir, { recursive: true });
+
+  console.log('\n===== [3] 收集并生成 SARIF =====');
   const workspace = process.env.WORKSPACE || process.cwd();
-  // sarif_file 支持逗号分隔多路径：单个文件 / 多个文件 / 单个目录 / 多个目录（目录扫描其中所有 .sarif）
-  const sarifPaths = sarifFile.split(',').map(s => s.trim()).filter(Boolean);
   const sarifFiles = [];
-  const missingPaths = [];
-  for (const rawPath of sarifPaths) {
-    let p = rawPath;
-    if (!fs.existsSync(p)) {
-      p = path.join(workspace, rawPath);
-    }
-    if (!fs.existsSync(p)) {
-      const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
-      if (gitDir) {
-        p = path.join(path.dirname(gitDir), rawPath);
-      }
-    }
-    if (!fs.existsSync(p)) {
-      missingPaths.push(rawPath);
-      continue;
-    }
-    if (fs.statSync(p).isDirectory()) {
-      console.log(`[INFO] 输入为目录: ${p}，扫描其中所有 .sarif 文件`);
-      const entries = fs.readdirSync(p);
-      const found = [];
-      for (const entry of entries) {
-        if (entry.toLowerCase().endsWith(SARIF_EXT)) {
-          found.push(path.join(p, entry));
-        }
-      }
-      if (found.length === 0) {
-        console.log(`[WARN] 目录中未找到 .sarif 文件: ${p}`);
-      }
-      sarifFiles.push(...found);
+  let apiConsumed = false;
+
+  // 数据源 1：report_file（CodeArts Markdown 报告或原生 SARIF，如 codeArts 插件能力）
+  if (reportFile) {
+    const resolved = resolveReportFiles(reportFile, workspace);
+    const nonEmptyFiles = resolved ? resolved.files.filter((f) => fs.statSync(f).size > 0) : [];
+    if (nonEmptyFiles.length > 0) {
+      const converted = convertReports(nonEmptyFiles, convertOutDir);
+      sarifFiles.push(...converted);
+      console.log(`[INFO] 数据源: 报告文件（${nonEmptyFiles.length} 个非空文件）`);
     } else {
-      sarifFiles.push(p);
-      console.log(`[OK] SARIF 文件: ${p}`);
+      console.log('[WARN] report_file 未找到非空报告文件');
     }
   }
 
-  if (sarifFiles.length > 0) {
-    console.log(`[OK] 共收集 ${sarifFiles.length} 个 SARIF 文件:`);
-    sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
-  }
-  if (missingPaths.length > 0) {
-    console.log(`[ERROR] SARIF 路径不存在: ${missingPaths.join(', ')}`);
+  // 数据源 2：CodeArts Check API（report_file 未产出且 API 参数就绪时兜底）
+  if (sarifFiles.length === 0 && apiReady) {
+    console.log('[INFO] 数据源: CodeArts Check API（不读取本地报告文件）');
+    apiConsumed = true;
+    try {
+      const api = new CodeArtsCheckApi({ ak: codeartsAk, sk: codeartsSk, token: codeartsToken, region });
+      const parsed = await api.fetchIssues({ projectId, taskId, taskName });
+      parsed.warnings.forEach((w) => console.log(`[WARN] ${w}`));
+      const sarif = SarifGenerator.generate(parsed);
+      const outName = `${parsed.task.taskName || 'codearts-check'}.sarif`;
+      const outPath = path.join(convertOutDir, outName);
+      fs.writeFileSync(outPath, JSON.stringify(sarif, null, 2), 'utf-8');
+      sarifFiles.push(outPath);
+      console.log(`[OK] 转换完成(CodeArts API): ${outName} (${parsed.issues.length} 条问题)`);
+    } catch (err) {
+      console.log(`[ERROR] CodeArts Check API 拉取失败: ${err.message}`);
+      setOutput('result', 'failed');
+      process.exit(1);
+    }
+  } else if (sarifFiles.length === 0 && !apiReady && !sarifFile) {
+    console.log('[ERROR] 未找到有效 SARIF（检查 report_file / sarif_file 路径，或配置 CodeArts API 参数）');
     setOutput('result', 'failed');
     process.exit(1);
   }
+
+  // 数据源 3：sarif_file（本地 SARIF 文件，与报告/API 数据源可并存）
+  if (sarifFile) {
+    const { sarifFiles: localFiles, missingPaths } = collectSarifFiles(sarifFile, workspace);
+    if (missingPaths.length > 0) {
+      console.log(`[ERROR] SARIF 路径不存在: ${missingPaths.join(', ')}`);
+      setOutput('result', 'failed');
+      process.exit(1);
+    }
+    sarifFiles.push(...localFiles);
+  }
+
   if (sarifFiles.length === 0) {
-    console.log('[ERROR] 未找到任何 SARIF 文件（检查 sarif_file 路径与目录内 .sarif 文件）');
+    console.log('[ERROR] 未找到任何 SARIF 文件（检查 report_file / sarif_file 路径，或配置 CodeArts API 参数）');
     setOutput('result', 'failed');
     process.exit(1);
   }
+
+  console.log(`[OK] 共收集 ${sarifFiles.length} 个 SARIF 文件:`);
+  sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
 
   console.log('\n===== [4] 检查并补齐代码片段（region.snippet） =====');
   const sourcePathInput = getInput('source_path');
@@ -422,120 +669,112 @@ async function run() {
   console.log(`[INFO] 源码根目录: ${sourceRoots.join(', ')}`);
   enrichSarifFiles(sarifFiles, sourceRoots);
 
-  let obsUrlValue = [];
-  if (sarifFiles.length > 0) {
-    console.log('\n===== [5] 构建 OBS 路径 =====');
-    const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
-    const now = new Date();
-    const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
-    // 统一路径结构：{前缀}/{仓库名}/{yyyyMMdd}.{HH}/{runId|manual}/{文件名}
-    const timePath = `${repoBaseName}/${dateStr}/${workflowRunId || 'manual'}`;
-    // 路径前缀按工具名动态拼装（如 spotbugs-results），工具名缺失时兜底 code-arts-check-results
-    const sarifUploads = sarifFiles.map((f) => {
-      const toolName = extractToolName(f);
-      const keyPrefix = `${buildToolPrefix(toolName)}/${timePath}`;
-      const name = path.basename(f);
-      return {
-        file: f,
-        name,
-        toolName,
-        keyPrefix,
-        downloadUrl: `${OBS_READ_ENDPOINT}/${keyPrefix}/${name}`
-      };
-    });
-    sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
+  console.log('\n===== [5] 构建 OBS 路径 =====');
+  const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
+  // 统一路径结构：{工具名前缀}-results/{仓库名}/{yyyyMMdd}.{HH}/{runId|manual}/{文件名}
+  const timePath = `${repoBaseName}/${dateStr}/${workflowRunId || 'manual'}`;
+  // 路径前缀按工具名动态拼装（如 spotbugs-results / codeartscheck-results），工具名缺失时兜底 code-arts-check-results
+  const sarifUploads = sarifFiles.map((f) => {
+    const toolName = extractToolName(f);
+    const keyPrefix = `${buildToolPrefix(toolName)}/${timePath}`;
+    const name = path.basename(f);
+    return {
+      file: f,
+      name,
+      toolName,
+      keyPrefix,
+      downloadUrl: `${OBS_READ_ENDPOINT}/${keyPrefix}/${name}`
+    };
+  });
+  sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
 
-    console.log('\n===== [6] 生成构建产物 JSON =====');
-    const buildResultDir = path.join(os.tmpdir(), 'sarif-analyze-output');
-    if (!fs.existsSync(buildResultDir)) {
-      fs.mkdirSync(buildResultDir, { recursive: true });
+  console.log('\n===== [6] 生成构建产物 JSON =====');
+  const buildResultDir = path.join(tmpDir, 'sarif-analyze-output');
+  fs.mkdirSync(buildResultDir, { recursive: true });
+
+  // 构建产物清单与 SARIF 使用同一路径（首个工具目录）
+  const buildResultKey = `${sarifUploads[0].keyPrefix}/build-result.json`;
+
+  const sarifDownloadUrls = sarifUploads.map(u => u.downloadUrl);
+  const sarifBuildings = sarifUploads.map((u) => {
+    return {
+      name: u.name,
+      // 工具名（runs[0].tool.driver.name），后端按 tool.driver.name 路由
+      type: u.toolName ? `${u.toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
+      downloadUrl: u.downloadUrl
+    };
+  });
+  const isSingleFile = sarifFiles.length === 1;
+  const buildResult = {
+    type: 'build',
+    buildings: isSingleFile ? sarifBuildings[0] : sarifBuildings
+  };
+  const buildResultPath = path.join(buildResultDir, 'build-result.json');
+  fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
+
+  console.log('\n===== [7] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
+  // server 由 OIDC SDK configure 动态返回 region，避免把区域写死
+  const { region: obsRegion } = configure({});
+  const server = `https://obs.${obsRegion}.myhuaweicloud.com`;
+  // esdk-obs-nodejs 的 initFactory 为 fire-and-forget（内部 await refresh 后才设置签名上下文），
+  // 构造后立即 putObject 会读到 null signatureContext（Cannot read properties of null (reading 'signature')），
+  // 此处让出一个微任务等待初始化完成。
+  const client = new ObsClient({
+    access_key_id: cred.accessKeyId,
+    secret_access_key: cred.secretAccessKey,
+    security_token: cred.securityToken,
+    server
+  });
+  await Promise.resolve();
+
+  // putObject 结果校验：HTTP 状态 2xx 视为成功，否则抛错（供 withRetryAsync 重试）
+  const assertUploadOk = (result, label) => {
+    const msg = (result && result.CommonMsg) || {};
+    if (!(msg.Status >= 200 && msg.Status < 300)) {
+      throw new Error(`${label} 上传失败 (${msg.Status})${msg.Code ? ' [' + msg.Code + ']' : ''}: ${msg.Message || '未知错误'}`);
     }
+  };
 
-    // 构建产物清单与 SARIF 使用同一路径（首个工具目录），不再单独使用 code-arts-check-results 前缀
-    const buildResultKey = `${sarifUploads[0].keyPrefix}/build-result.json`;
+  console.log('[INFO] 上传构建产物文件: build-result.json');
+  try {
+    // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
+    await withRetryAsync(() => client.putObject({
+      Bucket: OBS_BUCKET,
+      Key: buildResultKey,
+      SourceFile: buildResultPath,
+      ACL: 'public-read'
+    }).then(r => assertUploadOk(r, 'build-result.json')), { label: 'build-result.json 上传' });
+  } catch (e1) {
+    console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
+  }
 
-    const sarifDownloadUrls = sarifUploads.map(u => u.downloadUrl);
-    const sarifBuildings = sarifUploads.map((u) => {
-      return {
-        name: u.name,
-        // 通用 SARIF：优先取工具名（runs[0].tool.driver.name），后端按 tool.driver.name 路由
-        type: u.toolName ? `${u.toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
-        downloadUrl: u.downloadUrl
-      };
-    });
-
-    const isSingleFile = sarifFiles.length === 1;
-    const buildResult = {
-      type: 'build',
-      buildings: isSingleFile ? sarifBuildings[0] : sarifBuildings
-    };
-    const buildResultPath = path.join(buildResultDir, 'build-result.json');
-    fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
-
-    console.log('\n===== [7] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
-    // server 由 OIDC SDK configure 动态返回 region（与 pre-commit-action 一致），
-    // 避免把区域写死；临时凭证换取后构造客户端。
-    const { region } = configure({});
-    const server = `https://obs.${region}.myhuaweicloud.com`;
-    // esdk-obs-nodejs 的 initFactory 为 fire-and-forget（内部 await refresh 后才设置签名上下文），
-    // 构造后立即 putObject 会读到 null signatureContext（Cannot read properties of null (reading 'signature')），
-    // 此处让出一个微任务等待初始化完成。
-    const client = new ObsClient({
-      access_key_id: cred.accessKeyId,
-      secret_access_key: cred.secretAccessKey,
-      security_token: cred.securityToken,
-      server
-    });
-    await Promise.resolve();
-
-    // putObject 结果校验：HTTP 状态 2xx 视为成功，否则抛错（供 withRetryAsync 重试）
-    const assertUploadOk = (result, label) => {
-      const msg = (result && result.CommonMsg) || {};
-      if (!(msg.Status >= 200 && msg.Status < 300)) {
-        throw new Error(`${label} 上传失败 (${msg.Status})${msg.Code ? ' [' + msg.Code + ']' : ''}: ${msg.Message || '未知错误'}`);
-      }
-    };
-
-    console.log('[INFO] 上传构建产物文件: build-result.json');
+  for (let i = 0; i < sarifUploads.length; i++) {
+    const u = sarifUploads[i];
+    console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
     try {
       // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
       await withRetryAsync(() => client.putObject({
         Bucket: OBS_BUCKET,
-        Key: buildResultKey,
-        SourceFile: buildResultPath,
+        Key: `${u.keyPrefix}/${u.name}`,
+        SourceFile: u.file,
         ACL: 'public-read'
-      }).then(r => assertUploadOk(r, 'build-result.json')), { label: 'build-result.json 上传' });
-    } catch (e1) {
-      console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
+      }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
+    } catch (e2) {
+      console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
+      setOutput('result', 'failed');
+      process.exit(1);
     }
-
-    for (let i = 0; i < sarifUploads.length; i++) {
-      const u = sarifUploads[i];
-      console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
-      try {
-        // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-        await withRetryAsync(() => client.putObject({
-          Bucket: OBS_BUCKET,
-          Key: `${u.keyPrefix}/${u.name}`,
-          SourceFile: u.file,
-          ACL: 'public-read'
-        }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
-      } catch (e2) {
-        console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
-        setOutput('result', 'failed');
-        process.exit(1);
-      }
-    }
-    await client.close();
-
-    obsUrlValue = isSingleFile ? sarifUploads[0].downloadUrl : sarifUploads.map(u => u.downloadUrl);
-
-    console.log('\n================================================================');
-    console.log('[INFO] 上传成功');
-    console.log('================================================================');
   }
+  await client.close();
 
-  console.log('\n===== [9] 回调通知（失败指数退避重试，默认 3 次） =====');
+  console.log('\n================================================================');
+  console.log('[INFO] 上传成功');
+  console.log('================================================================');
+
+  console.log('\n===== [8] 回调通知（失败指数退避重试，默认 3 次） =====');
+  const obsUrls = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',
     pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
@@ -544,7 +783,7 @@ async function run() {
     branch: resolveBranch(),
     commitId: process.env.ATOMGIT_SHA || '',
     // 后端 DTO 为 List<String>，恒传数组兼容新旧后端（旧版无 StringOrListDeserializer）
-    obsUrl: Array.isArray(obsUrlValue) ? obsUrlValue : [obsUrlValue],
+    obsUrl: Array.isArray(obsUrls) ? obsUrls : [obsUrls],
     category: category || '',
     source: 'GITCODE_ACTION',
     sourceRunUrl: buildSourceRunUrl() || ''
@@ -556,20 +795,35 @@ async function run() {
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
     const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
     console.log(`查看上传结果解析: ${resultViewUrl}`);
-  } catch (cbErr) {
-    console.log(`[WARN] 回调通知发送失败: ${cbErr.message}`);
+  } catch (err) {
+    console.log(`[WARN] 回调通知发送失败: ${err.message}`);
     console.log('[INFO] SARIF 上传已成功，回调失败不影响最终结果');
   }
 
   setOutput('result', 'success');
 }
 
-module.exports = { run, enrichRegionSnippet, enrichSarifFiles, resolveSourceFile, withRetrySync, withRetryAsync, buildToolPrefix };
+module.exports = {
+  run,
+  convertReportFile,
+  convertReports,
+  resolveReportFiles,
+  collectSarifFiles,
+  CodeCheckReportParser,
+  SarifGenerator,
+  SarifNormalizer,
+  CodeArtsCheckApi,
+  enrichRegionSnippet,
+  enrichSarifFiles,
+  resolveSourceFile,
+  withRetrySync,
+  withRetryAsync,
+  buildToolPrefix
+};
 
 if (require.main === require.cache[eval('__filename')]) {
-  run().catch(err => {
-    const sanitizedMessage = sanitizePath(err.message);
-    console.error(`Action 执行失败: ${sanitizedMessage}`);
+  run().catch((err) => {
+    console.error(`Action 执行失败: ${sanitizePath(err.message)}`);
     setOutput('result', 'failed');
     process.exit(1);
   });
@@ -25887,6 +26141,785 @@ exports.z = function (fn) {
 
 /***/ }),
 
+/***/ 7739:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const crypto = __nccwpck_require__(6982);
+const https = __nccwpck_require__(5692);
+
+const ALGORITHM = 'SDK-HMAC-SHA256';
+
+// 华为云问题级别（defectLevel）-> 华为云报告中文级别
+const SEVERITY_MAP = {
+  '0': '致命',
+  '1': '严重',
+  '2': '一般',
+  '3': '提示'
+};
+
+// ============================================================
+// 华为云 AK/SK 签名（SDK-HMAC-SHA256，APIG 网关规范）
+// 与 openlibing-upload-sarif 的 signApigRequest 保持一致：
+// StringToSign 仅 3 行（无 CredentialScope），直接用 SK 做 HMAC-SHA256
+// ============================================================
+
+function sha256Hex(content) {
+  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+/** RFC3986 编码（空格 -> %20，且对 !'()* 也编码） */
+function rfc3986Encode(str) {
+  return encodeURIComponent(str).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+/** 规范化 URI：按 / 分段 RFC3986 编码，末尾补 /（华为云 APIG 签名规范） */
+function canonicalURI(uri) {
+  const segments = String(uri || '/').split('/');
+  const encoded = segments.map((s) => rfc3986Encode(s)).join('/');
+  if (encoded.length === 0 || encoded[encoded.length - 1] !== '/') {
+    return encoded + '/';
+  }
+  return encoded;
+}
+
+/**
+ * 构造 CanonicalRequest
+ * signedHeaders 必须包含 host 与 x-sdk-date
+ */
+function buildCanonicalRequest(method, uri, query, headers, signedHeaders, payload) {
+  const canonicalQuery = Object.keys(query)
+    .sort()
+    .map((k) => `${rfc3986Encode(k)}=${rfc3986Encode(String(query[k]))}`)
+    .join('&');
+
+  const canonicalHeaders = signedHeaders
+    .map((h) => `${h}:${String(headers[h] || '').trim().replace(/\s+/g, ' ')}\n`)
+    .join('');
+
+  const payloadHash = sha256Hex(payload);
+
+  return [
+    method,
+    canonicalURI(uri),
+    canonicalQuery,
+    canonicalHeaders,
+    signedHeaders.join(';'),
+    payloadHash
+  ].join('\n');
+}
+
+/**
+ * 对请求做 AK/SK 签名，返回需要附加的请求头
+ * @param {object} opts
+ * @param {string} opts.method GET/POST
+ * @param {string} opts.uri 请求路径（如 /v2/{project_id}/tasks）
+ * @param {object} opts.query 查询参数
+ * @param {object} opts.headers 原始请求头（需含 host）
+ * @param {string} opts.payload 请求体字符串（GET 为 ''）
+ * @param {string} opts.ak
+ * @param {string} opts.sk
+ * @returns {{'x-sdk-date': string, Authorization: string}}
+ */
+function signRequest({ method, uri, query = {}, headers = {}, payload = '', ak, sk }) {
+  const xSdkDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''); // YYYYMMDDTHHMMSSZ
+
+  const allHeaders = { ...headers, 'x-sdk-date': xSdkDate };
+  const signedHeaders = ['host', 'x-sdk-date'];
+
+  const canonicalRequest = buildCanonicalRequest(method, uri, query, allHeaders, signedHeaders, payload);
+  // 华为云 SDK-HMAC-SHA256：StringToSign 仅 3 行，直接用 SK 做 HMAC-SHA256
+  const stringToSign = [ALGORITHM, xSdkDate, sha256Hex(canonicalRequest)].join('\n');
+  const signature = crypto.createHmac('sha256', sk).update(stringToSign, 'utf8').digest('hex');
+
+  return {
+    'x-sdk-date': xSdkDate,
+    Authorization: `${ALGORITHM} Access=${ak}, SignedHeaders=${signedHeaders.join(';')}, Signature=${signature}`
+  };
+}
+
+function httpsRequest(options, body) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error('CodeArts Check API 请求超时（30s）'));
+    });
+    if (body) {
+      req.write(body);
+    }
+    req.end();
+  });
+}
+
+// ============================================================
+// CodeArts Check API 客户端
+// ============================================================
+
+class CodeArtsCheckApi {
+  /**
+   * @param {object} opts
+   * @param {string} opts.ak IAM AK（OIDC 临时凭证 HUAWEICLOUD_OIDC_AK）
+   * @param {string} opts.sk IAM SK（OIDC 临时凭证 HUAWEICLOUD_OIDC_SK）
+   * @param {string} [opts.token] 临时凭证 SecurityToken（OIDC 模式必传，作为 X-Security-Token 请求头）
+   * @param {string} [opts.region] 区域，默认 cn-north-4
+  */
+  constructor({ ak, sk, token = '', region = 'cn-north-4' }) {
+    if (!ak || !sk) {
+      throw new Error('缺少 CodeArts Check 鉴权凭证（ak/sk）');
+    }
+    this.ak = ak;
+    this.sk = sk;
+    this.token = token;
+    this.region = region;
+    this.host = `codecheck-ext.${region}.myhuaweicloud.com`;
+  }
+
+  /**
+   * 发起签名请求并解析 JSON 响应
+   */
+  async request(method, uri, query = {}, body = null) {
+    const payload = body === null ? '' : JSON.stringify(body);
+    const headers = {
+      host: this.host,
+      'Content-Type': 'application/json'
+    };
+    // 临时凭证（OIDC 模式）：SecurityToken 仅作为请求头，不参与签名计算
+    if (this.token) {
+      headers['X-Security-Token'] = this.token;
+    }
+    const signed = signRequest({
+      method,
+      uri,
+      query,
+      headers,
+      payload,
+      ak: this.ak,
+      sk: this.sk
+    });
+
+    const options = {
+      hostname: this.host,
+      port: 443,
+      path: uri + this.buildQueryString(query),
+      method,
+      headers: { ...headers, ...signed }
+    };
+
+    console.log(`[INFO] CodeArts Check API 请求: ${method} https://${this.host}${options.path} | 认证: ${this.token ? 'OIDC 临时凭证 + X-Security-Token' : 'AK/SK 签名'}`);
+
+    const resp = await httpsRequest(options, payload);
+    let data;
+    try {
+      data = JSON.parse(resp.body || '{}');
+    } catch (e) {
+      throw new Error(`CodeArts Check API 响应不是合法 JSON (HTTP ${resp.status}): ${resp.body.slice(0, 200)}`);
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`CodeArts Check API HTTP ${resp.status}: ${resp.body.slice(0, 300)}`);
+    }
+    return data;
+  }
+
+  buildQueryString(query) {
+    const keys = Object.keys(query);
+    if (keys.length === 0) {
+      return '';
+    }
+    return '?' + keys
+      .sort()
+      .map((k) => `${rfc3986Encode(k)}=${rfc3986Encode(String(query[k]))}`)
+      .join('&');
+  }
+
+  /**
+   * 获取代码问题列表（分页）
+   * GET /v2/tasks/{task_id}/defects-detail
+   * （v1 的 /v1/defect/issue-list-by-filter 未在公共网关发布，调用返回 APIGW.0101）
+   */
+  async listIssues(taskId, { page = 1, pageSize = 100 } = {}) {
+    const limit = pageSize || 100;
+    const offset = ((page || 1) - 1) * limit;
+    const data = await this.request('GET', `/v2/tasks/${taskId}/defects-detail`, { offset, limit });
+    return {
+      total: data.total || 0,
+      info: data.defects || []
+    };
+  }
+
+  /**
+   * 拉取任务全部问题并转换为与报告解析器一致的中间模型
+   * @param {object} opts
+   * @param {string} opts.projectId
+   * @param {string} opts.taskId
+   * @param {string} [opts.taskName] 仅用于 SARIF 文件名与日志显示
+   * @returns {Promise<{task: object, issues: Array, warnings: Array}>}
+   */
+  async fetchIssues({ projectId, taskId, taskName }) {
+    if (!projectId) {
+      throw new Error('缺少 project_id');
+    }
+    if (!taskId) {
+      throw new Error('缺少 task_id（可显式配置，或通过 codecheck_task_url 自动解析）');
+    }
+
+    const issues = [];
+    const warnings = [];
+    let page = 1;
+    const pageSize = 200;
+    let total = 0;
+    // 最多拉取 50 页（10000 条），防止异常循环
+    while (page <= 50) {
+      const resp = await this.listIssues(taskId, { page, pageSize });
+      total = resp.total || 0;
+      for (const item of resp.info || []) {
+        const issue = CodeArtsCheckApi.buildIssueFromApiItem(item);
+        if (issue) {
+          issues.push(issue);
+        } else {
+          warnings.push(`跳过无法解析的问题: ${JSON.stringify(item).slice(0, 200)}`);
+        }
+      }
+      if (issues.length >= total || (resp.info || []).length === 0) {
+        break;
+      }
+      page += 1;
+    }
+
+    return {
+      task: { taskId, taskName: taskName || '' },
+      issues,
+      warnings
+    };
+  }
+
+  /**
+   * 将 API 返回的单条问题转换为中间模型
+   * 兼容两种响应：ShowTaskDefectsV2（defect_level/rule_id/rule_name/defect_content/file_path/line_number）
+   * 与 IssueListByFilter（defectLevel/ruleId/criterionName/fragment.lineNum）
+   * @param {object} item 单条问题对象
+   * @returns {object|null} 中间模型 {ruleId, ruleName, message, severity, file, line, snippet}
+   */
+  static buildIssueFromApiItem(item) {
+    if (!item) {
+      return null;
+    }
+    const frag = Array.isArray(item.fragment) && item.fragment[0] ? item.fragment[0] : {};
+    const severity = SEVERITY_MAP[String(item.defect_level ?? item.defectLevel)] || '一般';
+    const ruleId = item.rule_id || item.ruleId || item.ruleRuleId || item.defectType || 'UNKNOWN';
+    const line = parseInt(item.line_number ?? frag.line_num ?? frag.lineNum, 10);
+    return {
+      ruleId,
+      ruleName: item.rule_name || item.criterionName || item.defectType || item.ruleId || ruleId,
+      message: item.defect_content || frag.description || item.defectType || item.criterionName || '',
+      severity,
+      file: item.file_path || frag.filePath || item.filePath || item.fileName || '',
+      line: Number.isFinite(line) && line > 0 ? line : 0,
+      snippet: frag.line_content || frag.lineContent || frag.codeContext || ''
+    };
+  }
+}
+
+/**
+ * 从 codecheck_gitcode_v2 步骤输出的 codeCheck_task_url 解析 CodeArts 参数
+ * 示例:
+ * https://devcloud.cn-north-4.huaweicloud.com/codechecknew/project/{projectId}/codecheck/task/{type}/{taskId}/tasklog?jobId={jobId}
+ * @param {string} url 任务 URL
+ * @returns {{projectId: string, taskId: string, jobId: string, region: string}|null} 解析失败返回 null
+ */
+function parseTaskUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return null;
+  }
+  let urlObj;
+  try {
+    urlObj = new URL(url.trim());
+  } catch (e) {
+    return null;
+  }
+  const segments = urlObj.pathname.split('/').filter(Boolean);
+  let projectId = '';
+  let taskId = '';
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (segments[i] === 'project' && segments[i + 1]) {
+      projectId = segments[i + 1];
+    }
+    // 路径形如 /task/{type}/{taskId}
+    if (segments[i] === 'task' && segments[i + 1] && segments[i + 2]) {
+      taskId = segments[i + 2];
+    }
+  }
+  const jobId = urlObj.searchParams.get('jobId') || urlObj.searchParams.get('job_id') || '';
+  const region = (urlObj.hostname.match(/\.(cn-[a-z]+-\d+)\./) || [])[1] || '';
+  // 必须解析到 project 或 task 段才算有效任务 URL
+  if (!projectId && !taskId) {
+    return null;
+  }
+  return { projectId, taskId, jobId, region };
+}
+
+module.exports = CodeArtsCheckApi;
+module.exports.signRequest = signRequest;
+module.exports.parseTaskUrl = parseTaskUrl;
+
+
+/***/ }),
+
+/***/ 9147:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+
+const SECTION_DETAIL = '### 2.5 详细问题列表';
+
+/**
+ * 华为云 CodeArts Check 报告(Markdown step_summary)解析器
+ *
+ * 主数据源为 "### 2.5 详细问题列表" 表格（每行一条问题），
+ * "## 3 问题详细分析" 章节的代码块用于回填问题行的代码片段。
+ * 输出中间模型 { task, issues, warnings }。
+ */
+class CodeCheckReportParser {
+  /**
+   * 从文件读取并解析报告
+   * @param {string} filePath 报告文件路径
+   * @returns {{task: object, issues: Array, warnings: Array}}
+   */
+  static parseFile(filePath) {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return CodeCheckReportParser.parse(content);
+  }
+
+  /**
+   * 解析报告内容
+   * @param {string} markdown 报告内容
+   * @returns {{task: {name: string, branch: string, gateResult: string}, issues: Array, warnings: Array}}
+   */
+  static parse(markdown) {
+    const warnings = [];
+    const task = { name: '', branch: '', gateResult: '' };
+    const issues = [];
+    const snippetMap = {};
+
+    if (typeof markdown !== 'string' || markdown.trim() === '') {
+      return { task, issues, warnings };
+    }
+
+    const lines = markdown.split(/\r?\n/);
+
+    this.parseTask(lines, task);
+    this.collectSnippets(lines, snippetMap);
+    this.parseDetailTable(lines, issues, snippetMap, warnings, markdown);
+
+    return { task, issues, warnings };
+  }
+
+  /**
+   * 解析 "## 1 任务摘要" 表格（可选元信息）
+   * @param {string[]} lines 报告行
+   * @param {object} task 输出对象
+   */
+  static parseTask(lines, task) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.includes('任务名称') || !line.includes('分支名称')) {
+        continue;
+      }
+      // 表头行后的第一个非空行即为数据行
+      for (let j = i + 1; j < lines.length; j++) {
+        const dataLine = lines[j].trim();
+        if (dataLine === '' || dataLine.startsWith('|')) {
+          if (dataLine === '' || /^\|[\s\-|]*\|$/.test(dataLine)) {
+            continue;
+          }
+          const cells = this.splitTableRow(dataLine);
+          if (cells.length >= 3) {
+            task.name = cells[0];
+            task.branch = cells[1];
+            task.gateResult = cells[2];
+          }
+          return;
+        }
+      }
+      return;
+    }
+  }
+
+  /**
+   * 从 "## 3 问题详细分析" 章节收集代码片段，映射为 `${file}:${line}` -> snippet
+   * @param {string[]} lines 报告行
+   * @param {Record<string, string>} snippetMap 输出映射
+   */
+  static collectSnippets(lines, snippetMap) {
+    let inAnalysis = false;
+    let currentKey = null;
+    let collecting = false;
+    let buffer = [];
+
+    const flush = () => {
+      if (currentKey && buffer.length > 0) {
+        snippetMap[currentKey] = buffer.join('\n');
+      }
+      buffer = [];
+      currentKey = null;
+      collecting = false;
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      if (/^### \d+\.\d+ /.test(line)) {
+        inAnalysis = true;
+        continue;
+      }
+      if (!inAnalysis) {
+        continue;
+      }
+      const keyMatch = line.match(/^\*\*问题代码\d+\*\*:\s*(.+?):(\d+)\s*$/);
+      if (keyMatch) {
+        flush();
+        currentKey = `${keyMatch[1]}:${keyMatch[2]}`;
+        continue;
+      }
+      if (line.trimStart().startsWith('```')) {
+        if (!collecting) {
+          // 代码块开始（可能带语言标记，如 ```JAVA）
+          collecting = true;
+          buffer = [];
+        } else {
+          flush();
+        }
+        continue;
+      }
+      if (collecting) {
+        buffer.push(line);
+      }
+    }
+    flush();
+  }
+
+  /**
+   * 解析 "### 2.5 详细问题列表" 表格，生成问题列表
+   * @param {string[]} lines 报告行
+   * @param {Array} issues 输出问题列表
+   * @param {Record<string, string>} snippetMap 代码片段映射
+   * @param {Array} warnings 输出警告列表
+   * @param {string} markdown 原始内容（用于判断是否应报错）
+   */
+  static parseDetailTable(lines, issues, snippetMap, warnings, markdown) {
+    const startIdx = lines.findIndex((l) => l.includes(SECTION_DETAIL));
+    if (startIdx < 0) {
+      // 有内容但缺少主章节：明确报错，避免静默产出空结果
+      if (markdown.trim() !== '') {
+        throw new Error(`报告缺少 "${SECTION_DETAIL}" 章节，无法解析问题`);
+      }
+      return;
+    }
+
+    for (let i = startIdx + 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line.startsWith('|')) {
+        // 遇到下一个章节标题或非表格行即结束
+        if (/^#{1,6} /.test(line)) {
+          break;
+        }
+        continue;
+      }
+      const cells = this.splitTableRow(line);
+      if (cells.length < 5) {
+        warnings.push(`跳过无法解析的报告行: ${line}`);
+        continue;
+      }
+      const severity = cells[0];
+      const ruleColumn = cells[1];
+      const message = cells[2];
+      const file = cells[3];
+      const lineNo = parseInt(cells[4], 10);
+
+      // 跳过表头与分隔行
+      if (severity === '严重程度' || /^-+$/.test(severity)) {
+        continue;
+      }
+      if (Number.isNaN(lineNo)) {
+        warnings.push(`跳过行号非法的报告行: ${line}`);
+        continue;
+      }
+
+      const ruleParts = ruleColumn.split(/\s+/);
+      const ruleId = ruleParts[0] || '';
+      const ruleName = ruleParts.slice(1).join(' ');
+      const key = `${file}:${lineNo}`;
+      issues.push({
+        severity,
+        ruleId,
+        ruleName,
+        message,
+        file,
+        line: lineNo,
+        snippet: snippetMap[key] || ''
+      });
+    }
+  }
+
+  /**
+   * 将 Markdown 表格行按 `|` 拆分为单元格数组（去除首尾空）
+   * @param {string} row 表格行
+   * @returns {string[]} 单元格
+   */
+  static splitTableRow(row) {
+    return row
+      .split('|')
+      .map((s) => s.trim())
+      .filter((s) => s !== '');
+  }
+}
+
+module.exports = CodeCheckReportParser;
+
+
+/***/ }),
+
+/***/ 9069:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const { buildPrimaryLocationLineHash } = __nccwpck_require__(4414);
+
+const SARIF_SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json';
+const SARIF_VERSION = '2.1.0';
+
+/** 实际工具名：华为云 CodeArts Check（无空格，后端 SarifParserFactory 按此精确路由） */
+const TOOL_NAME = 'CodeArtsCheck';
+
+/**
+ * 华为云代码检查级别 -> SARIF 2.1.0 level
+ * 致命/严重 -> error，一般 -> warning，提示 -> note；未知默认 warning。
+ */
+const LEVEL_MAP = {
+  致命: 'error',
+  严重: 'error',
+  一般: 'warning',
+  提示: 'note'
+};
+
+const DEFAULT_LEVEL = 'warning';
+
+/**
+ * 将华为云代码检查报告中间模型生成为 SARIF 2.1.0 对象。
+ *
+ * 与 openlibing-codecheck 现有解析器(CodeQlSarifParser)对齐：
+ * - tool.driver.name 写实际工具名 "CodeArtsCheck"（无空格），后端 SarifParserFactory 按此路由；
+ * - 规则名放在 rule.properties.name（CodeQlSarifParser 从此处读取）。
+ */
+class SarifGenerator {
+  /**
+   * @param {{task: object, issues: Array}} parsed 报告解析器输出的中间模型
+   * @returns {object} SARIF 2.1.0 对象
+   */
+  static generate(parsed) {
+    const rules = [];
+    const ruleIndex = new Map();
+    const results = [];
+
+    for (const issue of parsed.issues || []) {
+      if (!issue || !issue.ruleId) {
+        continue;
+      }
+      if (!ruleIndex.has(issue.ruleId)) {
+        const rule = {
+          id: issue.ruleId,
+          properties: { name: issue.ruleName || issue.ruleId },
+          defaultConfiguration: { level: this.mapLevel(issue.severity) },
+          fullDescription: { text: issue.message || '' }
+        };
+        ruleIndex.set(issue.ruleId, rule);
+        rules.push(rule);
+      }
+
+      const region = { startLine: issue.line };
+      if (issue.snippet) {
+        region.snippet = { text: issue.snippet };
+      }
+
+      results.push({
+        ruleId: issue.ruleId,
+        level: this.mapLevel(issue.severity),
+        message: { text: issue.message || '' },
+        // 后端 CodeQlSarifParser 从 partialFingerprints.primaryLocationLineHash 读取
+        // locationHashRaw，缺失会导致 buildFingerprintKey 跳过问题、不入库
+        partialFingerprints: {
+          primaryLocationLineHash: buildPrimaryLocationLineHash(
+            issue.file,
+            issue.line,
+            issue.snippet
+          )
+        },
+        locations: [
+          {
+            physicalLocation: {
+              artifactLocation: { uri: issue.file || '' },
+              region
+            }
+          }
+        ]
+      });
+    }
+
+    const driver = {
+      name: TOOL_NAME, // 实际工具名：华为云 CodeArts Check（无空格）
+      semanticVersion: ''
+    };
+    if (rules.length > 0) {
+      driver.rules = rules;
+    }
+
+    const run = {
+      tool: { driver }
+    };
+    if (results.length > 0) {
+      run.results = results;
+    }
+
+    return {
+      $schema: SARIF_SCHEMA,
+      version: SARIF_VERSION,
+      runs: [run]
+    };
+  }
+
+  /**
+   * 华为云代码检查级别映射为 SARIF level
+   * @param {string} severity 原始级别（致命/严重/一般/提示）
+   * @returns {string} SARIF level
+   */
+  static mapLevel(severity) {
+    return LEVEL_MAP[severity] || DEFAULT_LEVEL;
+  }
+}
+
+module.exports = SarifGenerator;
+
+
+/***/ }),
+
+/***/ 5301:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const { buildPrimaryLocationLineHash } = __nccwpck_require__(4414);
+
+/**
+ * 将华为云 CodeArts Check 原生 SARIF 规范化为 openlibing-codecheck 可消费的标准 SARIF。
+ *
+ * 需适配的差异（CodeArts Check 原生导出 vs 后端解析要求）：
+ * - tool.driver.name 原生通常为 "CodeArts Check"（带空格），后端 SarifParserFactory 按
+ *   工具名精确路由 → 统一改写为无空格 "CodeArtsCheck"；
+ * - results 不含 partialFingerprints，后端 extractLocationHash 取不到 primaryLocationLineHash，
+ *   导致 buildFingerprintKey 抛异常跳过问题 → 为每条 result 补齐；
+ * - 规则名在 rules[].properties.name（中文规则名），与 CodeQlSarifParser.extractRuleName 读取路径
+ *   一致，保留即可；级别（error/warning/note）映射后端已按 SARIF level 语义处理。
+ *
+ * 规范化对任何第三方 SARIF 同样有效（只要可解析出 runs/tool.driver/results）。
+ */
+class SarifNormalizer {
+  /**
+   * 规范化 CodeArts Check 原生 SARIF 文件。
+   *
+   * @param {string} filePath SARIF 文件路径
+   * @returns {{sarif: object, issueCount: number, warnings: string[]}}
+   */
+  static normalizeFile(filePath) {
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return SarifNormalizer.normalize(raw);
+  }
+
+  /**
+   * 规范化 SARIF 2.1.0 对象。
+   *
+   * @param {object} sarif SARIF 2.1.0 对象
+   * @returns {{sarif: object, issueCount: number, warnings: string[]}}
+   */
+  static normalize(sarif) {
+    const warnings = [];
+    if (!sarif || !Array.isArray(sarif.runs) || sarif.runs.length === 0) {
+      throw new Error('非法 SARIF：缺少 runs');
+    }
+    const run = sarif.runs[0];
+    if (!run.tool || !run.tool.driver) {
+      throw new Error('非法 SARIF：缺少 tool.driver');
+    }
+
+    // 后端 SarifParserFactory 按工具名精确路由：原生 "CodeArts Check"（带空格）统一为无空格 "CodeArtsCheck"
+    const originalTool = run.tool.driver.name;
+    const normalizedTool = 'CodeArtsCheck';
+    if (originalTool !== normalizedTool) {
+      run.tool.driver.name = normalizedTool;
+    }
+
+    const results = Array.isArray(run.results) ? run.results : [];
+    let issueCount = 0;
+    for (const result of results) {
+      if (!result || !result.ruleId) {
+        continue;
+      }
+      issueCount += 1;
+      const { uri, startLine, snippetText } = SarifNormalizer.extractLocation(result);
+      // 原生 SARIF 未携带指纹时补齐，保证后端 buildFingerprintKey 非空、问题可入库
+      result.partialFingerprints = result.partialFingerprints || {};
+      if (!result.partialFingerprints.primaryLocationLineHash) {
+        result.partialFingerprints.primaryLocationLineHash = buildPrimaryLocationLineHash(
+          uri,
+          startLine,
+          snippetText
+        );
+      }
+    }
+    console.log(`[INFO] SARIF 规范化: tool.driver.name "${originalTool}" -> "${normalizedTool}"`);
+    return { sarif, issueCount, warnings };
+  }
+
+  /**
+   * 提取 result 的物理位置字段。
+   *
+   * @param {object} result SARIF result
+   * @returns {{uri: string|undefined, startLine: number|undefined, snippetText: string|undefined}}
+   */
+  static extractLocation(result) {
+    const loc = result.locations && result.locations[0] && result.locations[0].physicalLocation;
+    if (!loc) {
+      return { uri: undefined, startLine: undefined, snippetText: undefined };
+    }
+    const uri = loc.artifactLocation && loc.artifactLocation.uri;
+    const region = loc.region || {};
+    return {
+      uri,
+      startLine: region.startLine,
+      snippetText: region.snippet && region.snippet.text
+    };
+  }
+}
+
+module.exports = SarifNormalizer;
+
+
+/***/ }),
+
 /***/ 7849:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -25968,6 +27001,43 @@ function installFetchPolyfill() {
 }
 
 module.exports = { installFetchPolyfill };
+
+
+/***/ }),
+
+/***/ 4414:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const crypto = __nccwpck_require__(6982);
+
+/**
+ * 计算 SARIF result 的主位置行 hash（partialFingerprints.primaryLocationLineHash）。
+ *
+ * 与 openlibing-codecheck 后端对齐：CodeQlSarifParser 从
+ * result.partialFingerprints.primaryLocationLineHash 读取 locationHashRaw，
+ * buildFingerprintKey 要求该值非空，否则问题会被跳过、不入库。
+ *
+ * 策略（稳定优先）：
+ * - 有行内容 snippet 时，对行内容取 SHA-256（前 32 位 hex），行号偏移不影响指纹；
+ * - 无 snippet 时，对 uri|startLine 取 SHA-256（前 32 位 hex）。
+ *
+ * @param {string} uri 文件路径
+ * @param {number|string|undefined} startLine 起始行
+ * @param {string|undefined} snippetText 行内容（可选）
+ * @returns {string} 32 位小写 hex
+ */
+function buildPrimaryLocationLineHash(uri, startLine, snippetText) {
+  const raw =
+    snippetText && snippetText.length > 0
+      ? snippetText
+      : `${uri || ''}|${startLine == null ? '' : startLine}`;
+  return crypto.createHash('sha256').update(raw, 'utf-8').digest('hex').slice(0, 32);
+}
+
+module.exports = { buildPrimaryLocationLineHash };
 
 
 /***/ }),

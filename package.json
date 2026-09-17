@@ -6,7 +6,8 @@
   "scripts": {
     "package": "ncc build index.js -o dist",
     "zip": "node zip.js",
-    "build": "npm run package && npm run zip"
+    "build": "npm run package && npm run zip",
+    "test": "node --test"
   },
   "author": "test-devops",
   "license": "ISC",
