@@ -21,10 +21,10 @@ stages:
     jobs:
       pr-label-running:
         name: pr-label-running
-        runs-on: ["ubuntu-latest", "x64", "small"]
+        runs-on: ["self-hosted", "region=cn"]
         steps:
           - name: pr-label-running
-            uses: ozvale/pr-label-action@main
+            uses: openlibing/pr-label-action@v1.0.0
             with:
               token: ${{ secrets.ROBOT_TOKEN }}
               add_labels: ci-pipeline-running
@@ -69,10 +69,10 @@ post:
   jobs:
     label-pr:
       name: pr-label-complete
-      runs-on: ["ubuntu-latest", "x64", "slim"]
+      runs-on: ["self-hosted", "region=cn"]
       steps:
         - name: set pr label complete
-          uses: ozvale/pr-label-action@main
+          uses: openlibing/pr-label-action@v1.0.0
           with:
             token: ${{ secrets.ROBOT_TOKEN }}
             add_labels: ${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-passed' || 'ci-pipeline-failed' }}
