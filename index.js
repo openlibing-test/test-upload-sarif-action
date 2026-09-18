@@ -14,6 +14,7 @@ const ObsClient = require('esdk-obs-nodejs');
 const CodeCheckReportParser = require('./src/parser/CodeCheckReportParser');
 const SarifGenerator = require('./src/sarif/SarifGenerator');
 const SarifNormalizer = require('./src/sarif/SarifNormalizer');
+const SarifUriNormalizer = require('./src/sarif/SarifUriNormalizer');
 const CodeArtsCheckApi = require('./src/api/CodeArtsCheckApi');
 
 // OIDC 签名 SDK：APIG V11-HMAC-SHA256 签名 + HTTPS 请求 + 自包含 OIDC 换证。
@@ -522,6 +523,43 @@ function collectSarifFiles(sarifFile, workspace) {
   return { sarifFiles, missingPaths };
 }
 
+/** 解析仓库根目录：优先取 workspace 下 git 仓库根（兼容 repo_workspace 嵌套），兜底 workspace 本身 */
+function resolveRepoRoot(workspace) {
+  const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  if (gitDir) {
+    console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
+    return path.dirname(gitDir);
+  }
+  console.log(`[INFO] 仓库根目录（兜底 workspace）: ${workspace}`);
+  return workspace;
+}
+
+/** 对 SARIF 文件批量做 uri 归一化（机器绝对路径 -> 相对仓库根），原地写回变更文件 */
+function normalizeSarifUriFiles(sarifFiles, repoRoot) {
+  let changedFiles = 0;
+  let changedResults = 0;
+  for (const f of sarifFiles) {
+    let sarifObj;
+    try {
+      sarifObj = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    } catch (e) {
+      console.log(`[WARN] uri 归一化跳过（无法解析 SARIF）: ${path.basename(f)}`);
+      continue;
+    }
+    const n = SarifUriNormalizer.normalizeSarifUris(sarifObj, repoRoot);
+    if (n > 0) {
+      fs.writeFileSync(f, JSON.stringify(sarifObj, null, 2), 'utf-8');
+      changedFiles += 1;
+      changedResults += n;
+    }
+  }
+  if (changedFiles > 0 || changedResults > 0) {
+    console.log(`[INFO] uri 归一化完成: ${changedFiles} 个文件 / ${changedResults} 条 result`);
+  } else {
+    console.log('[INFO] uri 归一化: 全部 result 已是相对仓库根路径，无需变更');
+  }
+}
+
 // ---------- 主流程 ----------
 
 async function run() {
@@ -646,6 +684,12 @@ async function run() {
 
   console.log(`[OK] 共收集 ${sarifFiles.length} 个 SARIF 文件:`);
   sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
+
+  console.log('\n===== [3.5] SARIF uri 归一化（机器绝对路径 -> 相对仓库根） =====');
+  // 部分工具（如 spotbugs）输出 runner 机器绝对路径，部分输出相对路径；统一剥离仓库根前缀，
+  // 保证后端告警路径可读、无 snippet 时指纹跨机器稳定。
+  const repoRoot = resolveRepoRoot(workspace);
+  normalizeSarifUriFiles(sarifFiles, repoRoot);
 
   console.log('\n===== [4] 检查并补齐代码片段（region.snippet） =====');
   const sourcePathInput = getInput('source_path');
@@ -802,9 +846,12 @@ module.exports = {
   convertReports,
   resolveReportFiles,
   collectSarifFiles,
+  resolveRepoRoot,
+  normalizeSarifUriFiles,
   CodeCheckReportParser,
   SarifGenerator,
   SarifNormalizer,
+  SarifUriNormalizer,
   CodeArtsCheckApi,
   enrichRegionSnippet,
   enrichSarifFiles,
