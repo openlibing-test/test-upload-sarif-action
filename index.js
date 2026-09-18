@@ -431,7 +431,8 @@ function resolveSourceFile(uri, sourceRoots) {
 /**
  * 为 SARIF results 补充 region.snippet（实际代码行内容），提升后端告警可读性。
  * 仅当 region 缺少 snippet 时补齐：按 artifactLocation.uri + startLine(/endLine) 读源码；
- * 有 endLine 取多行，否则单行；源码不可读时静默跳过。
+ * 在问题行（或多行范围）上下各扩展 2 行作为上下文窗口，而非仅问题行本身；
+ * 源码不可读时静默跳过。
  * @returns {number} 成功补齐的 result 数量
  */
 function enrichRegionSnippet(sarifObj, sourceRoots) {
@@ -452,8 +453,9 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
     } catch (e) {
       continue;
     }
-    const start = region.startLine;
-    const end = region.endLine || start;
+    // 上下文窗口：问题行（或多行范围）上面 2 行 ~ 下面 2 行，越界自动裁剪
+    const start = Math.max(1, region.startLine - 2);
+    const end = Math.min(lines.length, (region.endLine || region.startLine) + 2);
     const snippetLines = lines.slice(start - 1, end);
     if (!snippetLines.length) continue;
     region.snippet = { text: snippetLines.join('\n') };
