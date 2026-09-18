@@ -50,6 +50,20 @@ test('规范化: tool.driver.name 统一为无空格 CodeArtsCheck（原生带�
   assert.equal(sarif.runs[0].tool.driver.name, 'CodeArtsCheck');
 });
 
+test('规范化: 第三方工具名不被改写（如 gitleaks）', () => {
+  const sarif = sampleCodeArtsSarif();
+  sarif.runs[0].tool.driver.name = 'gitleaks';
+  const { sarif: normalized } = SarifNormalizer.normalize(sarif);
+  assert.equal(normalized.runs[0].tool.driver.name, 'gitleaks');
+});
+
+test('规范化: 已是无空格 CodeArtsCheck 时保持原样', () => {
+  const sarif = sampleCodeArtsSarif();
+  sarif.runs[0].tool.driver.name = 'CodeArtsCheck';
+  const { sarif: normalized } = SarifNormalizer.normalize(sarif);
+  assert.equal(normalized.runs[0].tool.driver.name, 'CodeArtsCheck');
+});
+
 test('规范化: 为缺失指纹的结果补齐 primaryLocationLineHash(32 位 hex)', () => {
   const { sarif } = SarifNormalizer.normalize(sampleCodeArtsSarif());
   const result = sarif.runs[0].results[0];

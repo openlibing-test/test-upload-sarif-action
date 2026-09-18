@@ -44,11 +44,16 @@ class SarifNormalizer {
       throw new Error('非法 SARIF：缺少 tool.driver');
     }
 
-    // 后端 SarifParserFactory 按工具名精确路由：原生 "CodeArts Check"（带空格）统一为无空格 "CodeArtsCheck"
+    // 后端 SarifParserFactory 按工具名精确路由：原生 "CodeArts Check"（带空格）统一为无空格 "CodeArtsCheck"。
+    // 仅改写 CodeArts 系工具名；第三方 SARIF（如 gitleaks/spotbugs）保持原名，避免工具身份被篡改导致后端误路由。
     const originalTool = run.tool.driver.name;
-    const normalizedTool = 'CodeArtsCheck';
+    let normalizedTool = originalTool;
+    if (/codearts\s*check/i.test(originalTool || '')) {
+      normalizedTool = 'CodeArtsCheck';
+    }
     if (originalTool !== normalizedTool) {
       run.tool.driver.name = normalizedTool;
+      console.log(`[INFO] SARIF 规范化: tool.driver.name "${originalTool}" -> "${normalizedTool}"`);
     }
 
     const results = Array.isArray(run.results) ? run.results : [];
@@ -69,7 +74,6 @@ class SarifNormalizer {
         );
       }
     }
-    console.log(`[INFO] SARIF 规范化: tool.driver.name "${originalTool}" -> "${normalizedTool}"`);
     return { sarif, issueCount, warnings };
   }
 
