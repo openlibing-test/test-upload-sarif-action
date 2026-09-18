@@ -590,9 +590,12 @@ async function run() {
   console.log('\n===== [1] 校验参数 =====');
   const apiReady = Boolean(legacyAk && legacySk && projectId && taskId);
   if (!reportFile && !sarifFile && !apiReady) {
-    console.log('[ERROR] 缺少数据源：report_file（CodeArts 报告）或 sarif_file（本地 SARIF）或 CodeArts API 参数（project_id + task_id，可通过 codecheck_task_url 自动解析）至少配置其一');
-    setOutput('result', 'failed');
-    process.exit(1);
+    // 无数据源不按失败退出：版本级触发（push/workflow_dispatch）且上游扫描无告警时，
+    // 不会产出 SARIF 报告（如 pre-commit-action 串接场景），此时无内容可上传属正常情况。
+    console.log('[WARN] 未配置任何数据源（report_file / sarif_file / CodeArts API 参数），无扫描报告可上传，按成功退出');
+    console.log('[INFO] 常见原因：上游扫描无告警未生成 SARIF 报告（如 pre-commit 检查全部通过）');
+    setOutput('result', 'success');
+    return;
   }
   if (!V11Signer || !sendRequest || !getCredentials || !configure) {
     console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，无法进行 OIDC 认证');
