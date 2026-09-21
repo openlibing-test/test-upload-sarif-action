@@ -488,7 +488,7 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
   return enriched;
 }
 
-/** 遍历 SARIF 文件，缺少 region.snippet 时补齐并写回原文件 */
+/** 遍历 SARIF 文件，缺少 region.snippet / contextRegion 时补齐并写回原文件 */
 function enrichSarifFiles(sarifFiles, sourceRoots) {
   for (const f of sarifFiles) {
     let sarifObj;
@@ -501,9 +501,32 @@ function enrichSarifFiles(sarifFiles, sourceRoots) {
     const n = enrichRegionSnippet(sarifObj, sourceRoots);
     if (n > 0) {
       fs.writeFileSync(f, JSON.stringify(sarifObj, null, 2), 'utf-8');
-      console.log(`[OK] ${path.basename(f)}: 已补充 ${n} 个 result 的 region.snippet`);
+      console.log(`[OK] ${path.basename(f)}: 已补充 ${n} 个 result 的代码上下文（snippet 对齐问题行 + contextRegion 窗口）`);
+      continue;
+    }
+    // n=0 时区分原因：无 result / 已含完整上下文（幂等）/ 源码不可读
+    const run = sarifObj.runs && sarifObj.runs[0];
+    const results = (run && run.results) || [];
+    if (results.length === 0) {
+      console.log(`[INFO] ${path.basename(f)}: 无 result，跳过代码上下文补齐`);
+      continue;
+    }
+    const allHaveContext = results.every(r => {
+      const loc = r && r.locations && r.locations[0] && r.locations[0].physicalLocation;
+      return (
+        loc &&
+        loc.region &&
+        loc.region.snippet &&
+        loc.region.snippet.text &&
+        loc.contextRegion &&
+        loc.contextRegion.snippet &&
+        loc.contextRegion.snippet.text
+      );
+    });
+    if (allHaveContext) {
+      console.log(`[INFO] ${path.basename(f)}: 全部 result 已含 snippet 与 contextRegion，无需补充`);
     } else {
-      console.log(`[INFO] ${path.basename(f)}: 无需补充（已含 snippet 或源码不可读）`);
+      console.log(`[INFO] ${path.basename(f)}: 源码不可读，无法补齐代码上下文（检查 source_path 与 SARIF uri 是否指向工作区内文件）`);
     }
   }
 }
@@ -756,31 +779,11 @@ async function run() {
   });
   sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
 
-  console.log('\n===== [6] 生成构建产物 JSON =====');
-  const buildResultDir = path.join(tmpDir, 'sarif-analyze-output');
-  fs.mkdirSync(buildResultDir, { recursive: true });
-
-  // 构建产物清单与 SARIF 使用同一路径（首个工具目录）
-  const buildResultKey = `${sarifUploads[0].keyPrefix}/build-result.json`;
-
+  console.log('\n===== [6] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
+  // 回调需要的 SARIF 下载 URL 列表（后端 SarifParseServiceImpl 直接按该列表解析，无需 build-result.json）
   const sarifDownloadUrls = sarifUploads.map(u => u.downloadUrl);
-  const sarifBuildings = sarifUploads.map((u) => {
-    return {
-      name: u.name,
-      // 工具名（runs[0].tool.driver.name），后端按 tool.driver.name 路由
-      type: u.toolName ? `${u.toolName}代码检查结果（sarif）` : 'SARIF代码检查结果（sarif）',
-      downloadUrl: u.downloadUrl
-    };
-  });
   const isSingleFile = sarifFiles.length === 1;
-  const buildResult = {
-    type: 'build',
-    buildings: isSingleFile ? sarifBuildings[0] : sarifBuildings
-  };
-  const buildResultPath = path.join(buildResultDir, 'build-result.json');
-  fs.writeFileSync(buildResultPath, JSON.stringify(buildResult, null, 2), 'utf-8');
 
-  console.log('\n===== [7] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
   // server 由 OIDC SDK configure 动态返回 region，避免把区域写死
   const { region: obsRegion } = configure({});
   const server = `https://obs.${obsRegion}.myhuaweicloud.com`;
@@ -802,19 +805,6 @@ async function run() {
       throw new Error(`${label} 上传失败 (${msg.Status})${msg.Code ? ' [' + msg.Code + ']' : ''}: ${msg.Message || '未知错误'}`);
     }
   };
-
-  console.log('[INFO] 上传构建产物文件: build-result.json');
-  try {
-    // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
-    await withRetryAsync(() => client.putObject({
-      Bucket: OBS_BUCKET,
-      Key: buildResultKey,
-      SourceFile: buildResultPath,
-      ACL: 'public-read'
-    }).then(r => assertUploadOk(r, 'build-result.json')), { label: 'build-result.json 上传' });
-  } catch (e1) {
-    console.log(`[WARN] 构建产物文件上传失败: ${e1.message}`);
-  }
 
   for (let i = 0; i < sarifUploads.length; i++) {
     const u = sarifUploads[i];
@@ -839,7 +829,7 @@ async function run() {
   console.log('[INFO] 上传成功');
   console.log('================================================================');
 
-  console.log('\n===== [8] 回调通知（失败指数退避重试，默认 3 次） =====');
+  console.log('\n===== [7] 回调通知（失败指数退避重试，默认 3 次） =====');
   const obsUrls = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
   const callbackPayload = {
     repoUrl: process.env.ATOMGIT_REPOSITORY_URL || '',

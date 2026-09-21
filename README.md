@@ -2,7 +2,7 @@
 
 ## 简介
 
-统一 SARIF 上传插件：将任意静态扫描工具产出的 SARIF 文件（支持单文件或目录）、华为云 CodeArts Check 代码检查报告（Markdown/原生 SARIF）或 CodeArts Check API 拉取的问题明细转换为 SARIF，上传到华为云 OBS 对象存储，生成标准化的构建产物 JSON，并通过 APIG 网关回调通知 OpenLibing 服务。本插件已归并原 `codeArts-check-upload-sarif-action` 的能力。
+统一 SARIF 上传插件：将任意静态扫描工具产出的 SARIF 文件（支持单文件或目录）、华为云 CodeArts Check 代码检查报告（Markdown/原生 SARIF）或 CodeArts Check API 拉取的问题明细转换为 SARIF，上传到华为云 OBS 对象存储，并通过 APIG 网关回调通知 OpenLibing 服务。本插件已归并原 `codeArts-check-upload-sarif-action` 的能力。
 
 - **插件名**: `openlibing-upload-sarif`
 - **认证模式**: OIDC 联邦认证（免静态 AK/SK），由插件内嵌 SDK 自包含换证，无需额外运行 `huaweicloud-oidc-auth` 插件
@@ -70,7 +70,6 @@ OBS 对象键的格式为（路径前缀按工具名动态拼装，与 pre-commi
 - 时间戳: 按执行时刻生成，精确到小时（`yyyyMMdd.HH`，与 pre-commit-action 一致）
 - `workflowRunId`: 取 `ATOMGIT_RUN_ID`；缺失时用 `manual` 兜底，保证路径层级固定
 - 每个 SARIF 文件按其自身工具名独立拼装前缀（多工具上传时各自归位到对应前缀）
-- `build-result.json` 构建产物清单与 SARIF 使用同一路径（首个工具目录），不单独使用前缀
 
 OBS 桶: `openlibing-gitcode-action`
 
@@ -186,54 +185,15 @@ steps:
 - `source_path` 未配置时，默认在 `ATOMGIT_WORKSPACE` 下按文件名递归查找源码
 - 已含 `contextRegion` 的 result 跳过，不重复处理；源码不可读时静默跳过，不影响上传
 
-## 构建产物 JSON 格式
-
-插件会在临时目录下生成 `build-result.json`，并随 SARIF 一同上传到 OBS。`type` 字段优先取自 SARIF 的 `runs[0].tool.driver.name`（如 `CodeQL`、`SpotBugs`、`CodeArtsCheck`），解析失败则使用通用类型。
-
-**单文件模式**（只有一个 SARIF 文件时，`buildings` 为单个对象）:
-
-```json
-{
-  "type": "build",
-  "buildings": {
-    "name": "scan-results.sarif",
-    "type": "CodeQL代码检查结果（sarif）",
-    "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250910.14/run-123/scan-results.sarif"
-  }
-}
-```
-
-**多文件模式**（多个 SARIF 文件时，`buildings` 为数组）:
-
-```json
-{
-  "type": "build",
-  "buildings": [
-    {
-      "name": "codeql-java.sarif",
-      "type": "CodeQL代码检查结果（sarif）",
-      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/codeql-results/your-repo/20250910.14/run-123/codeql-java.sarif"
-    },
-    {
-      "name": "spotbugs.sarif",
-      "type": "SpotBugs代码检查结果（sarif）",
-      "downloadUrl": "https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com/spotbugs-results/your-repo/20250910.14/run-123/spotbugs.sarif"
-    }
-  ]
-}
-```
-
 ## 执行流程
 
 1. 校验输入参数（三种数据源至少配置其一、SDK 加载状态）
 2. SDK 自包含 OIDC 换证（自申请 OIDC ID Token + 调用华为云 STS 换取临时凭证）
 3. 收集并生成 SARIF：`report_file`（Markdown 解析 / 原生 SARIF 规范化）→ CodeArts Check API 兜底拉取（`codecheck_task_url` 或显式 `project_id`+`task_id`）→ `sarif_file`（本地 SARIF 收集，支持目录模式）
-4. 检查并补齐代码片段（`region.snippet` 缺失时按 `uri`+行号读源码补齐）
-5. 初始化 `esdk-obs-nodejs` 客户端（OIDC 临时凭证，等待签名上下文就绪）
-6. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
-7. 生成 `build-result.json` 构建产物（工具名取自 SARIF）
-8. 上传构建产物与 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限，指数退避重试 3 次）
-9. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`，指数退避重试 3 次）
+4. 检查并补齐代码片段（`region.snippet` 对齐问题行、`contextRegion` 补上下文窗口）
+5. 根据仓库名、时间戳与 `ATOMGIT_RUN_ID` 构建 OBS 路径
+6. 上传 SARIF 文件到 OBS（OIDC 临时凭证 + 公共读权限，指数退避重试 3 次）
+7. 通过 APIG 回调通知 OpenLibing 服务（V11 签名 + `X-Security-Token`，指数退避重试 3 次）
 
 ## 注意事项
 
