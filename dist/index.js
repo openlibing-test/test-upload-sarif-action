@@ -437,8 +437,9 @@ function resolveSourceFile(uri, sourceRoots) {
 
 /**
  * 为 SARIF results 补充 region.snippet（实际代码行内容），提升后端告警可读性。
- * 仅当 region 缺少 snippet 时补齐：按 artifactLocation.uri + startLine(/endLine) 读源码；
- * 在问题行（或多行范围）上下各扩展 2 行作为上下文窗口，而非仅问题行本身；
+ * 仅当 region 缺少 snippet、或已有 snippet 仅为单行（上下文不足，如 CodeArts Check 自带单行代码）时补齐：
+ * 按 artifactLocation.uri + startLine(/endLine) 读源码，在问题行（或多行范围）上下各扩展 2 行
+ * 作为上下文窗口，而非仅问题行本身；已含多行 snippet 的 result 跳过，不覆盖。
  * 源码不可读时静默跳过。
  * @returns {number} 成功补齐的 result 数量
  */
@@ -451,7 +452,8 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
     if (!loc || !loc.artifactLocation || !loc.artifactLocation.uri) continue;
     const region = loc.region;
     if (!region || !region.startLine || region.startLine < 1) continue;
-    if (region.snippet && region.snippet.text) continue; // 已有代码上下文，跳过
+    // 已有多行 snippet（含换行）视为完整上下文，跳过；单行 snippet 视为不足，覆盖为标准窗口
+    if (region.snippet && region.snippet.text && /\n/.test(region.snippet.text)) continue;
     const src = resolveSourceFile(loc.artifactLocation.uri, sourceRoots);
     if (!src) continue;
     let lines;

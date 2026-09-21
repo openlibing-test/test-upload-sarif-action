@@ -16,6 +16,7 @@ function setup(fileContentLines, startLine, extra = {}) {
   const region = { startLine };
   if (extra.endLine) region.endLine = extra.endLine;
   if (extra.hasSnippet) region.snippet = { text: 'existing' };
+  if (extra.multiLineSnippet) region.snippet = { text: 'l4\nl5\nl6' };
   const sarif = {
     version: '2.1.0',
     runs: [{
@@ -76,13 +77,25 @@ test('snippet 补充: 多行范围（endLine）保留范围并上下各加 2 行
   }
 });
 
-test('snippet 补充: 已有 snippet 的 result 跳过（不覆盖）', () => {
+test('snippet 补充: 已有多行 snippet 的 result 跳过（不覆盖）', () => {
+  const lines = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9', 'l10'];
+  const { sarif, root } = setup(lines, 5, { multiLineSnippet: true });
+  try {
+    const n = enrichRegionSnippet(sarif, [root]);
+    assert.equal(n, 0);
+    assert.equal(sarif.runs[0].results[0].locations[0].physicalLocation.region.snippet.text, 'l4\nl5\nl6');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('snippet 补充: 已有单行 snippet 的 result 覆盖为标准窗口（CodeArts Check 场景）', () => {
   const lines = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9', 'l10'];
   const { sarif, root } = setup(lines, 5, { hasSnippet: true });
   try {
     const n = enrichRegionSnippet(sarif, [root]);
-    assert.equal(n, 0);
-    assert.equal(sarif.runs[0].results[0].locations[0].physicalLocation.region.snippet.text, 'existing');
+    assert.equal(n, 1);
+    assert.equal(sarif.runs[0].results[0].locations[0].physicalLocation.region.snippet.text, 'l3\nl4\nl5\nl6\nl7');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -15,7 +15,7 @@
   3. `sarif_file`：本地任意工具的 SARIF 文件（单文件/多文件/目录），不绑定具体扫描工具
 - 自动识别 SARIF 文件中的工具名（`runs[0].tool.driver.name`）用于构建产物类型，后端按 `tool.driver.name` 路由
 - CodeArts 原生 SARIF 自动规范化：工具名 `"CodeArts Check"`（带空格）统一改写为 `"CodeArtsCheck"`，并为缺失 `partialFingerprints.primaryLocationLineHash` 的结果补齐指纹（保证问题可入库）
-- 自动补齐 `region.snippet`（代码上下文）：SARIF 缺少代码片段信息时，按 `uri` + 行号读取源码补齐，提升后端告警可读性
+- 自动补齐 `region.snippet`（代码上下文）：SARIF 缺少代码片段信息、或仅有单行 snippet（如 CodeArts Check）时，按 `uri` + 行号读取源码补齐为上下各 2 行窗口，提升后端告警可读性
 - OIDC 免静态凭证：插件内嵌 `@openlibing/huaweicloud-oidc-client` SDK，自申请 OIDC ID Token 并调用华为云 STS 换证，OBS 上传与 APIG 回调全程使用临时凭证
 - 内嵌 `esdk-obs-nodejs` SDK 上传 OBS，上传对象设置公共读权限（无需下载 obsutil）
 - 通过 APIG 网关回调通知 OpenLibing 扫描服务（V11-HMAC-SHA256 签名 + `X-Security-Token`）
@@ -179,10 +179,10 @@ steps:
 
 ### 自动补齐代码片段（region.snippet）
 
-部分扫描工具（如 SpotBugs）的原生 SARIF 只输出行号、不含代码文本。插件在检测到 `region` 缺少 `snippet` 时，按 `artifactLocation.uri` + `startLine(/endLine)` 从源码根目录读取对应代码行自动补齐：
+部分扫描工具（如 SpotBugs）的原生 SARIF 只输出行号、不含代码文本；部分工具（如 CodeArts Check）虽自带 snippet 但仅有单行。插件在检测到 `region` 缺少 `snippet`、或已有 snippet 仅为单行（上下文不足）时，按 `artifactLocation.uri` + `startLine(/endLine)` 从源码根目录读取对应代码行自动补齐（问题行上下各 2 行的上下文窗口）：
 
 - `source_path` 未配置时，默认在 `ATOMGIT_WORKSPACE` 下按文件名递归查找源码
-- 已含 `region.snippet.text` 的 result 跳过，不重复处理
+- 已含多行 `region.snippet.text` 的 result 跳过，不重复处理
 - 源码不可读时静默跳过，不影响上传
 
 ## 构建产物 JSON 格式
