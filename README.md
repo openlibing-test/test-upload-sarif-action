@@ -181,9 +181,9 @@ steps:
 部分扫描工具（如 SpotBugs）的原生 SARIF 只输出行号、不含代码文本；部分工具（如 CodeArts Check）虽自带 snippet 但内容可能与源码不一致。插件按 `artifactLocation.uri` + `startLine(/endLine)` 从源码根目录读取源码补齐：
 
 - `region.snippet`：对齐为**问题行本身**（或多行问题范围）的实际源码，供前端做内容匹配定位高亮行；工具自带 snippet 与文件实际内容不一致时也会被覆盖
-- `contextRegion.snippet`：问题行（或多行范围）**上下各 2 行**的上下文窗口，供前端展示上下文
+- `contextRegion.snippet`：问题行（或多行范围）**上下各 2 行**的上下文窗口，供前端展示上下文；工具自带的不同窗口也会被覆盖为统一窗口，前端展示固定 5 行
 - `source_path` 未配置时，默认在 `ATOMGIT_WORKSPACE` 下按文件名递归查找源码
-- 已含 `contextRegion` 的 result 跳过，不重复处理；源码不可读时静默跳过，不影响上传
+- 源码不可读时静默跳过，不影响上传
 
 ## 执行流程
 

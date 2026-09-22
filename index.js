@@ -433,7 +433,7 @@ function resolveSourceFile(uri, sourceRoots) {
  * - region.snippet：对齐为问题行本身（或多行问题范围）的源码文本。前端用它做内容匹配定位
  *   高亮行；工具自带 snippet 若与文件实际内容不一致也会被覆盖，保证匹配稳定命中。
  * - contextRegion.snippet：问题行（或多行范围）上下各 2 行的上下文窗口，供前端展示上下文。
- *   已有 contextRegion 则不重复处理；源码不可读时静默跳过。
+ *   工具自带的不同窗口（如 3 行）也会被覆盖为统一窗口，保证前端展示固定 5 行；源码不可读时静默跳过。
  * @returns {number} 成功补充的 result 数量
  */
 function enrichRegionSnippet(sarifObj, sourceRoots) {
@@ -466,18 +466,20 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
       changed = true;
     }
 
-    // 2) contextRegion：上下文窗口（问题范围上下各 2 行，越界自动裁剪），前端展示用
-    const hasCtxSnippet =
-      loc.contextRegion && loc.contextRegion.snippet && loc.contextRegion.snippet.text;
-    if (!hasCtxSnippet) {
-      const ctxStart = Math.max(1, startLine - 2);
-      const ctxEnd = Math.min(lines.length, endLine + 2);
-      const ctxLines = lines.slice(ctxStart - 1, ctxEnd);
-      if (ctxLines.length) {
+    // 2) contextRegion：固定为问题范围上下各 2 行的窗口（越界自动裁剪），前端展示统一 5 行；
+    //    工具自带的不同窗口（如 3 行）也一律覆盖对齐
+    const ctxStart = Math.max(1, startLine - 2);
+    const ctxEnd = Math.min(lines.length, endLine + 2);
+    const ctxLines = lines.slice(ctxStart - 1, ctxEnd);
+    if (ctxLines.length) {
+      const ctxText = ctxLines.join('\n');
+      const hasCtxSnippet =
+        loc.contextRegion && loc.contextRegion.snippet && loc.contextRegion.snippet.text;
+      if (!hasCtxSnippet || loc.contextRegion.snippet.text !== ctxText) {
         loc.contextRegion = {
           startLine: ctxStart,
           endLine: ctxEnd,
-          snippet: { text: ctxLines.join('\n') }
+          snippet: { text: ctxText }
         };
         changed = true;
       }

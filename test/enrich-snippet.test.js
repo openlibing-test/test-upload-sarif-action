@@ -26,6 +26,9 @@ function setup(fileContentLines, startLine, extra = {}) {
       }]
     }]
   };
+  if (extra.contextRegion) {
+    sarif.runs[0].results[0].locations[0].physicalLocation.contextRegion = extra.contextRegion;
+  }
   return { sarif, root };
 }
 
@@ -113,6 +116,61 @@ test('补充: 已有 snippet 与问题行不一致时对齐为文件实际内容
     assert.equal(n, 1);
     const loc = sarif.runs[0].results[0].locations[0].physicalLocation;
     assert.equal(loc.region.snippet.text, 'l5');
+    assert.equal(loc.contextRegion.snippet.text, 'l3\nl4\nl5\nl6\nl7');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('补充: 工具自带 3 行 contextRegion 时覆盖为统一 5 行窗口', () => {
+  const lines = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9', 'l10'];
+  const { sarif, root } = setup(lines, 5, {
+    contextRegion: { startLine: 4, endLine: 6, snippet: { text: 'l4\nl5\nl6' } }
+  });
+  try {
+    const n = enrichRegionSnippet(sarif, [root]);
+    assert.equal(n, 1);
+    const loc = sarif.runs[0].results[0].locations[0].physicalLocation;
+    assert.equal(loc.region.snippet.text, 'l5');
+    assert.equal(loc.contextRegion.startLine, 3);
+    assert.equal(loc.contextRegion.endLine, 7);
+    assert.equal(loc.contextRegion.snippet.text, 'l3\nl4\nl5\nl6\nl7');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('补充: 工具自带 3 行 contextRegion 时覆盖为统一 5 行窗口（多行范围）', () => {
+  const lines = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9', 'l10'];
+  const { sarif, root } = setup(lines, 4, {
+    endLine: 6,
+    contextRegion: { startLine: 3, endLine: 7, snippet: { text: 'l3\nl4\nl5\nl6\nl7' } }
+  });
+  try {
+    const n = enrichRegionSnippet(sarif, [root]);
+    assert.equal(n, 1);
+    const loc = sarif.runs[0].results[0].locations[0].physicalLocation;
+    assert.equal(loc.region.snippet.text, 'l4\nl5\nl6');
+    assert.equal(loc.contextRegion.startLine, 2);
+    assert.equal(loc.contextRegion.endLine, 8);
+    assert.equal(loc.contextRegion.snippet.text, 'l2\nl3\nl4\nl5\nl6\nl7\nl8');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('补充: 工具自带 5 行 contextRegion 与窗口一致时不重复处理', () => {
+  const lines = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9', 'l10'];
+  const { sarif, root } = setup(lines, 5, {
+    problemSnippet: true,
+    contextRegion: { startLine: 3, endLine: 7, snippet: { text: 'l3\nl4\nl5\nl6\nl7' } }
+  });
+  try {
+    const n = enrichRegionSnippet(sarif, [root]);
+    assert.equal(n, 0);
+    const loc = sarif.runs[0].results[0].locations[0].physicalLocation;
+    assert.equal(loc.contextRegion.startLine, 3);
+    assert.equal(loc.contextRegion.endLine, 7);
     assert.equal(loc.contextRegion.snippet.text, 'l3\nl4\nl5\nl6\nl7');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
