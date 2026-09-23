@@ -1,7 +1,6 @@
 'use strict';
 
 const fs = require('fs');
-const path = require('path');
 const { buildPrimaryLocationLineHash } = require('../util/fingerprint');
 
 /**
@@ -63,7 +62,14 @@ function toRepoRelative(uri, repoRoot) {
   if (!decoded) return null;
   if (isAbsoluteLike(decoded)) {
     if (!isUnderRepoRoot(decoded, repoRoot)) return null;
-    return normalizeSlashes(path.relative(repoRoot, decoded));
+    // 统一为正斜杠后手动剥离仓库根前缀，不依赖平台 path.relative：
+    // path.relative 在 Windows/Linux 上对盘符路径行为不一致，会造成跨平台结果差异。
+    const u = normalizeSlashes(decoded);
+    const r = normalizeSlashes(repoRoot).replace(/\/+$/, '');
+    if (u.length > r.length) {
+      return u.slice(r.length + 1);
+    }
+    return '';
   }
   // 相对路径：剥离 ./ 前缀并统一分隔符（相对仓库根即当前工作目录）
   return normalizeSlashes(decoded).replace(/^\.\//, '');

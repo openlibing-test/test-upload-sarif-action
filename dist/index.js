@@ -241,7 +241,7 @@ function resolveReportFiles(reportFile, workspace) {
     const found = tryResolveCandidate(candidate);
     if (found) return found;
   }
-  const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
   if (gitDir) {
     const found = tryResolveCandidate(path.join(path.dirname(gitDir), reportFile));
     if (found) return found;
@@ -272,7 +272,11 @@ function convertReportFile(reportFile, outDir) {
     issueCount = parsed.issues.length;
     warnings.push(...parsed.warnings);
   }
-  const outName = path.basename(reportFile).replace(/\.(md|markdown|sarif)$/i, '') + '.sarif';
+  // 输出文件名包含来源父目录名（如 module-a-report.sarif），
+  // 避免不同目录的同名报告（module-a/report.md 与 module-b/report.md）互相覆盖。
+  const parentDir = path.basename(path.dirname(reportFile));
+  const stem = path.basename(reportFile).replace(/\.(md|markdown|sarif)$/i, '');
+  const outName = (parentDir && parentDir !== '.' ? `${parentDir}-${stem}` : stem) + '.sarif';
   const outPath = path.join(outDir, outName);
   fs.writeFileSync(outPath, JSON.stringify(sarif, null, 2), 'utf-8');
   return { outPath, issueCount, warnings };
@@ -281,8 +285,18 @@ function convertReportFile(reportFile, outDir) {
 /** 批量转换报告文件，返回生成的 SARIF 文件路径列表 */
 function convertReports(reportFiles, outDir) {
   const sarifFiles = [];
+  const seenNames = new Set();
   for (const reportFile of reportFiles) {
     const { outPath, issueCount, warnings } = convertReportFile(reportFile, outDir);
+    // 同一父目录下的同名报告（如 report.md 与 report.sarif）转换结果仍可能重名，
+    // 检测到输出重名时明确报错退出，避免静默覆盖导致报告内容丢失。
+    const outName = path.basename(outPath);
+    if (seenNames.has(outName)) {
+      console.log(`[ERROR] 转换输出文件重名: ${outName}（来源 ${reportFile}），请检查 report_file 是否包含同名报告`);
+      setOutput('result', 'failed');
+      process.exit(1);
+    }
+    seenNames.add(outName);
     warnings.forEach((w) => console.log(`[WARN] ${path.basename(reportFile)}: ${w}`));
     console.log(`[OK] 转换完成: ${path.basename(reportFile)} -> ${path.basename(outPath)} (${issueCount} 条问题)`);
     sarifFiles.push(outPath);
@@ -551,7 +565,7 @@ function collectSarifFiles(sarifFile, workspace) {
       p = path.join(workspace, rawPath);
     }
     if (!fs.existsSync(p)) {
-      const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+      const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
       if (gitDir) {
         p = path.join(path.dirname(gitDir), rawPath);
       }
@@ -583,7 +597,7 @@ function collectSarifFiles(sarifFile, workspace) {
 
 /** 解析仓库根目录：优先取 workspace 下 git 仓库根（兼容 repo_workspace 嵌套），兜底 workspace 本身 */
 function resolveRepoRoot(workspace) {
-  const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
   if (gitDir) {
     console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
     return path.dirname(gitDir);
@@ -733,6 +747,18 @@ async function run() {
       console.log(`[ERROR] SARIF 路径不存在: ${missingPaths.join(', ')}`);
       setOutput('result', 'failed');
       process.exit(1);
+    }
+    // 与 report_file 传入的 .sarif 保持一致：规范化（工具名统一 + 补齐指纹），
+    // 否则缺指纹的扫描结果会被后端跳过、不入库。
+    for (const f of localFiles) {
+      try {
+        const { sarif, issueCount, warnings } = SarifNormalizer.normalizeFile(f);
+        fs.writeFileSync(f, JSON.stringify(sarif, null, 2), 'utf-8');
+        warnings.forEach((w) => console.log(`[WARN] ${path.basename(f)}: ${w}`));
+        console.log(`[INFO] SARIF 规范化: ${path.basename(f)} (${issueCount} 条问题)`);
+      } catch (e) {
+        console.log(`[WARN] SARIF 规范化跳过（无法解析或缺少 runs/tool.driver）: ${path.basename(f)}: ${e.message}`);
+      }
     }
     sarifFiles.push(...localFiles);
   }
@@ -26999,7 +27025,6 @@ module.exports = SarifNormalizer;
 
 
 const fs = __nccwpck_require__(9896);
-const path = __nccwpck_require__(6928);
 const { buildPrimaryLocationLineHash } = __nccwpck_require__(4414);
 
 /**
@@ -27061,7 +27086,14 @@ function toRepoRelative(uri, repoRoot) {
   if (!decoded) return null;
   if (isAbsoluteLike(decoded)) {
     if (!isUnderRepoRoot(decoded, repoRoot)) return null;
-    return normalizeSlashes(path.relative(repoRoot, decoded));
+    // 统一为正斜杠后手动剥离仓库根前缀，不依赖平台 path.relative：
+    // path.relative 在 Windows/Linux 上对盘符路径行为不一致，会造成跨平台结果差异。
+    const u = normalizeSlashes(decoded);
+    const r = normalizeSlashes(repoRoot).replace(/\/+$/, '');
+    if (u.length > r.length) {
+      return u.slice(r.length + 1);
+    }
+    return '';
   }
   // 相对路径：剥离 ./ 前缀并统一分隔符（相对仓库根即当前工作目录）
   return normalizeSlashes(decoded).replace(/^\.\//, '');

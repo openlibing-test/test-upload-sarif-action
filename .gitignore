@@ -4,4 +4,4 @@ gitcode-action.md
 
 node_modules/
 
-.zip
+*.zip

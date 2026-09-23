@@ -141,6 +141,23 @@ test('指纹键唯一性: MD5(tool|ruleId|filePath|locationHashRaw) 无重复', 
   assert.equal(new Set(keys).size, keys.length, 'fingerprintKey 不应重复');
 });
 
+test('转换输出: 不同目录同名报告输出文件名不冲突', () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-name-'));
+  const moduleA = path.join(outDir, 'module-a');
+  const moduleB = path.join(outDir, 'module-b');
+  fs.mkdirSync(moduleA, { recursive: true });
+  fs.mkdirSync(moduleB, { recursive: true });
+  const reportA = path.join(moduleA, 'report.md');
+  const reportB = path.join(moduleB, 'report.md');
+  fs.copyFileSync(FIXTURE, reportA);
+  fs.copyFileSync(FIXTURE, reportB);
+
+  const { outPath: outA } = convertReportFile(reportA, outDir);
+  const { outPath: outB } = convertReportFile(reportB, outDir);
+  assert.notEqual(path.basename(outA), path.basename(outB), '同名报告输出文件名应含父目录区分');
+  assert.ok(fs.existsSync(outA) && fs.existsSync(outB), '两份转换结果都应落盘，互不覆盖');
+});
+
 test('真实 CodeArts Check SARIF: 规范化后被 CodeQlSarifParser 逻辑消费', () => {
   const fixture = path.join(__dirname, 'fixtures', 'codearts-check.sarif');
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-ca-'));
