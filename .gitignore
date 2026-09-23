@@ -1,0 +1,7 @@
+.agents
+pre-commit-action
+gitcode-action.md
+
+node_modules/
+
+*.zip

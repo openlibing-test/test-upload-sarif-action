@@ -1,0 +1,134 @@
+name: "openlibing-upload-sarif"
+version: 1.2.10
+author: "test-devops"
+description: "统一 SARIF 上传插件：将任意工具产出的 SARIF、CodeArts 代码检查报告(Markdown/原生 SARIF)或 CodeArts Check API 拉取的问题明细转换为 SARIF 并上传到 OBS 生成构建产物 JSON（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）"
+
+inputs:
+  report_file:
+    description: "（可选）代码检查结果路径：Markdown 报告(.md/.markdown)或 CodeArts 原生导出的 SARIF 文件(.sarif)，支持通配符/目录/逗号分隔多值。不传时可直接走 codecheck_task_url + CodeArts Check API"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "报告文件路径（可选）"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  sarif_file:
+    description: "SARIF 文件/目录路径，逗号分隔支持多值：单个文件、多个文件、单个目录、多个目录（目录自动扫描其中所有 .sarif 文件，非递归）"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "SARIF 文件/目录路径"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  codecheck_task_url:
+    description: "codecheck_gitcode_v2 步骤输出的 codeCheck_task_url（任务 URL），从中解析 project_id/task_id/region/jobId，未显式配置 project_id/task_id 时兜底使用"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "CodeArts 任务 URL"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  project_id:
+    description: "CodeArts 项目 ID（报告/SARIF 文件为空或缺失时，从 CodeArts Check API 兜底拉取问题明细；可通过 codecheck_task_url 自动解析）"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "CodeArts 项目 ID"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  task_id:
+    description: "CodeArts 检查任务 ID（任务定位，可通过 codecheck_task_url 自动解析）"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "CodeArts 任务 ID"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  task_name:
+    description: "CodeArts 检查任务名（可选，仅用于 SARIF 文件名与日志显示；任务定位请使用 task_id 或 codecheck_task_url）"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "CodeArts 任务名"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  region:
+    description: "CodeArts 区域（可选。优先读此参数，其次从 codeCheck_task_url 解析，再从环境变量 CODEARTS_REGION 等自动读取，最后默认 cn-north-4）"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "区域"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  category:
+    description: "检查结果分类（用户手动传入，不传则为空）"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "结果分类"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  source_path:
+    description: "源码根目录（可选，逗号分隔多个）。SARIF 缺少 region.snippet（代码上下文）时，按 uri+行号读源码补齐；不传则默认在 ATOMGIT_WORKSPACE 下按文件名查找"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "源码根目录"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  env_type:
+    description: "环境类型：prod（正式环境）/ beta（测试环境）。不传则默认 prod"
+    required: false
+    default: "prod"
+    layout:
+      type: "input"
+      label: "环境类型"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+
+outputs:
+  result:
+    description: "上传结果：success 或 failed"
+
+runs:
+  using: "node16"
+  main: "dist/index.js"
