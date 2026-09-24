@@ -1,0 +1,23 @@
+name: code-metrics-scan
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  repository: read
+  id-token: write
+
+jobs:
+  code-metrics-scan:
+    name: 代码度量指标扫描
+    runs-on: ["self-hosted", "region=cn"]
+    steps:
+      - name: Checkout
+        uses: checkout
+
+      # 插件使用 OIDC 联邦认证上传（无需凭证），permissions: id-token: write 已声明
+      - name: code-metrics-scan
+        uses: openlibing/code-metrics-action@6723b5fca2a631a680386c860cb3dbc67e502849
