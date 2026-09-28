@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '0 0 3 * * ?'
   workflow_dispatch:
+  push: # 临时：合入默认分支前在 full-check-update 上验证，通过后删除本段
+    branches:
+      - full-check-update
 
 permissions:
   repository: read
