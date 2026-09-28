@@ -14,6 +14,7 @@ on:
 permissions:
   repository: read
   pr: write
+  id-token: write
 
 stages:
   initiate:
@@ -48,6 +49,9 @@ stages:
               node-version: 20
               cache: true
 
+          - name: Install npm dependencies
+            run: npm install
+
           - name: setup-prettier
             run: |
               npm install --save-dev --save-exact prettier@3.9.5
@@ -60,10 +64,27 @@ stages:
               version: 1.26
               cache: true
 
+          - name: Install SARIF formatter
+            run: npm install --no-save @microsoft/eslint-formatter-sarif@3.1.0
+
+          - name: Create report directory
+            run: mkdir -p ./tmp_pre-commit-reports/
+
           - name: pre-commit
-            uses: openlibing/pre-commit-action@v1.0.1
+            id: pre-commit
+            uses: openlibing/pre-commit-action@v1.0.2
             with:
               extra_args: ${{ inputs.extra_args }}
+              gc_token: ${{ secrets.ROBOT_TOKEN }}
+              report-dir: ./tmp_pre-commit-reports/
+
+          - name: upload sarif reports
+            if: ${{ always() }}
+            uses: openlibing/upload-sarif-action@v1.0.0
+            with:
+              sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
+              source_path: src
+              category: "pre-commit-report"
 
 post:
   jobs:
