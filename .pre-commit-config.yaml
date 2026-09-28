@@ -32,3 +32,20 @@ repos:
         entry: npx prettier --write
         language: system
         files: \.(json|yml|yaml|md)$
+
+  - repo: local
+    hooks:
+      - id: eslint-sarif
+        name: eslint (sarif report)
+        entry: ./node_modules/.bin/eslint
+        language: system
+        files: ^src/.*\.(js|ts)$
+        require_serial: true
+        args:
+          - --config
+          - eslint.config.mjs
+          - --format
+          - "@microsoft/eslint-formatter-sarif"
+          - --output-file
+          - ./tmp_pre-commit-reports/eslint.sarif
+          - --no-error-on-unmatched-pattern
