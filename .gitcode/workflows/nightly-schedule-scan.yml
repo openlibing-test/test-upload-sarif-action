@@ -22,6 +22,7 @@ stages:
             uses: checkout
             with:
               token: ${{ secrets.ROBOT_TOKEN }}
+              ref: main
 
           - name: setup-go
             uses: setup-go
