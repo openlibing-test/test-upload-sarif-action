@@ -2,7 +2,7 @@ name: nightly-schedule-scan
 
 on:
   schedule:
-    - cron: '0 0 3 * * ?'
+    - cron: "0 0 3 * * ?"
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ stages:
     jobs:
       pre-commit:
         name: pre-commit
-        runs-on: ['self-hosted', 'region=overseas']
+        runs-on: ["self-hosted", "region=overseas"]
         steps:
           - name: Checkout repository
             uses: checkout
