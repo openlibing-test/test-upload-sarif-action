@@ -1,5 +1,5 @@
 name: "openlibing-upload-sarif"
-version: 1.2.10
+version: 1.2.13
 author: "test-devops"
 description: "统一 SARIF 上传插件：将任意工具产出的 SARIF、CodeArts 代码检查报告(Markdown/原生 SARIF)或 CodeArts Check API 拉取的问题明细转换为 SARIF 并上传到 OBS 生成构建产物 JSON（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）"
 
@@ -107,6 +107,18 @@ inputs:
     layout:
       type: "input"
       label: "源码根目录"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  obs_acl:
+    description: "SARIF 对象上传 OBS 时的 ACL（public-read / private）。默认 public-read：当前后端通过匿名 HTTP GET 下载；后端切换为带凭证下载后，配置 private 关闭匿名可读（Ref issues #11/#12）"
+    required: false
+    default: "public-read"
+    layout:
+      type: "input"
+      label: "OBS 对象 ACL"
       extend_prop:
         visible_conditions: []
         disabled_conditions: []
