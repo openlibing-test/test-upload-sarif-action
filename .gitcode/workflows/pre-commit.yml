@@ -2,10 +2,13 @@ name: pre-commit
 
 on:
   workflow_dispatch:
-  pull_request_target: # 使用 pull_request_target 确保 PR 流水线始终读取默认分支（master）的最新配置文件
+  push: # 推送时也执行 pre-commit 检查
+    branches:
+      - main
+  pull_request_target: ## 使用 pull_request_target 确保 PR 流水线始终读取默认分支（main）的最新配置文件
     branches:
       - "*"
-  pull_request_comment: # PR 评论事件：当用户在 PR 中发表评论时触发
+  pull_request_comment:
     types: [created]
     comments: ["/pre-commit"]
     branches:
@@ -21,6 +24,7 @@ stages:
     jobs:
       pr-label-running:
         name: pr-label-running
+        if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
         runs-on: ["self-hosted", "region=cn"]
         steps:
           - name: pr-label-running
@@ -41,6 +45,7 @@ stages:
             uses: checkout
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
+              allow-unsafe-pr-checkout: true # 关闭 fork PR 检出拦截，避免流水线在 fork PR 场景失败
 
           - name: setup-node
             uses: setup-node
@@ -61,7 +66,7 @@ stages:
               cache: true
 
           - name: pre-commit
-            uses: openlibing/pre-commit-action@v1.0.1
+            uses: openlibing/pre-commit-action@v1.0.2
             with:
               extra_args: ${{ inputs.extra_args }}
 
@@ -69,6 +74,7 @@ post:
   jobs:
     label-pr:
       name: pr-label-complete
+      if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
       runs-on: ["self-hosted", "region=cn"]
       steps:
         - name: set pr label complete
