@@ -16,7 +16,13 @@
     "esdk-obs-nodejs": "^3.26.2"
   },
   "devDependencies": {
+    "@eslint/js": "^9.10.0",
+    "@microsoft/eslint-formatter-sarif": "3.1.0",
     "@vercel/ncc": "^0.38.1",
-    "adm-zip": "^0.5.16"
+    "adm-zip": "^0.5.16",
+    "eslint": "^9.10.0",
+    "globals": "^16.5.0",
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^8.1.0"
   }
 }

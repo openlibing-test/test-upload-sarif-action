@@ -32,3 +32,25 @@ repos:
         entry: npx prettier --write
         language: system
         files: \.(json|yml|yaml|md)$
+
+  - repo: local
+    hooks:
+      - id: eslint-sarif
+        name: eslint (sarif report)
+        # entry 先建输出目录：ESLint --output-file 不创建父目录，不能依赖流水线 mkdir
+        entry: >
+          node -e "require('fs').mkdirSync('tmp_pre-commit-reports',{recursive:true});const r=require('child_process').spawnSync(process.execPath,['node_modules/eslint/bin/eslint.js',...process.argv.slice(1)],{stdio:'inherit'});process.exit(r.status==null?1:r.status)" --
+        language: system
+        # 覆盖全部 .js/.ts 源码（含根目录 index.js/zip.js 与 test/），与 eslint.config.mjs 的 files 范围对齐
+        # 排除 ncc 打包产物 dist/index.js（eslint.config.mjs 已 ignores）
+        files: \.(js|ts)$
+        exclude: ^dist/
+        require_serial: true
+        args:
+          - --config
+          - eslint.config.mjs
+          - --format
+          - "@microsoft/eslint-formatter-sarif"
+          - --output-file
+          - ./tmp_pre-commit-reports/eslint.sarif
+          - --no-error-on-unmatched-pattern
