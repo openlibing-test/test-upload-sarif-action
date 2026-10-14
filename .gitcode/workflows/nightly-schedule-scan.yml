@@ -57,3 +57,31 @@ stages:
               sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
               source_path: src
               category: "pre-commit-report"
+
+      ut-coverage:
+        name: UT 覆盖率
+        runs-on: ["self-hosted", "region=cn"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              token: ${{ secrets.ROBOT_TOKEN }}
+
+          - name: setup-node
+            uses: setup-node
+            with:
+              node-version: 20
+              cache: true
+
+          - name: Install npm dependencies
+            run: npm install
+
+          - name: Run tests with coverage
+            # node 内置测试运行器（node --test）经 c8 采集 V8 覆盖率，产出 coverage/coverage-final.json
+            run: npx --yes c8@^10 --reporter=text --reporter=json node --test
+
+          - name: Upload UT coverage
+            if: ${{ always() }}
+            uses: openlibing/upload-ut-action@v1.0.2
+            with:
+              report_dir: coverage/coverage-final.json
