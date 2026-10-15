@@ -576,10 +576,7 @@ function enrichSarifFiles(sarifFiles, sourceRoots) {
     }
     const n = enrichRegionSnippet(sarifObj, sourceRoots);
     if (n > 0) {
-      const newContent = JSON.stringify(sarifObj, null, 2);
-      if (newContent !== originalContent) {
-        fs.writeFileSync(f, newContent, 'utf-8');
-      }
+      fs.writeFileSync(f, JSON.stringify(sarifObj, null, 2), 'utf-8');
       console.log(`[OK] ${path.basename(f)}: 已补充 ${n} 个 result 的代码上下文（snippet 对齐问题行 + contextRegion 窗口）`);
       continue;
     }
@@ -753,20 +750,6 @@ async function run() {
   const convertOutDir = path.join(tmpDir, 'sarif-convert-output');
   fs.mkdirSync(convertOutDir, { recursive: true });
 
-  // Ref issues #11/#12：SARIF 转换临时目录生命周期管理。目录内 SARIF 含补齐
-  // 后的源码 snippet（凭证类规则可能是明文凭证），任务结束不应跨任务残留。
-  // 注册 exit 钩子，覆盖 process.exit(1) 失败退出与正常结束全部路径统一兜底清理。
-  process.on('exit', () => {
-    try {
-      if (fs.existsSync(convertOutDir)) {
-        fs.rmSync(convertOutDir, { recursive: true, force: true });
-        console.log(`[INFO] 已清理 SARIF 转换临时目录: ${convertOutDir}`);
-      }
-    } catch (e) {
-      console.log(`[WARN] 清理 SARIF 转换临时目录失败: ${e.message}`);
-    }
-  });
-
   console.log('\n===== [3] 收集并生成 SARIF =====');
   const workspace = process.env.WORKSPACE || process.cwd();
   const sarifFiles = [];
@@ -820,15 +803,10 @@ async function run() {
     }
     // 与 report_file 传入的 .sarif 保持一致：规范化（工具名统一 + 补齐指纹），
     // 否则缺指纹的扫描结果会被后端跳过、不入库。
-    // Ref issues #11：仅在规范化确实改变内容时回写，避免无条件重写工作区文件。
     for (const f of localFiles) {
       try {
-        const before = fs.readFileSync(f, 'utf-8');
         const { sarif, issueCount, warnings } = SarifNormalizer.normalizeFile(f);
-        const after = JSON.stringify(sarif, null, 2);
-        if (after !== before) {
-          fs.writeFileSync(f, after, 'utf-8');
-        }
+        fs.writeFileSync(f, JSON.stringify(sarif, null, 2), 'utf-8');
         warnings.forEach((w) => console.log(`[WARN] ${path.basename(f)}: ${w}`));
         console.log(`[INFO] SARIF 规范化: ${path.basename(f)} (${issueCount} 条问题)`);
       } catch (e) {
@@ -890,13 +868,6 @@ async function run() {
   sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
 
   console.log('\n===== [6] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
-  // Ref issues #11/#12：OBS 对象 ACL 可配置。当前后端 SarifParseServiceImpl 通过
-  // 匿名 HTTP GET 下载，默认保持 public-read 兼容；后端切换为带凭证下载后，
-  // workflow 显式配置 obs_acl=private 即可关闭匿名可读。
-  const OBS_ACL_WHITELIST = ['private', 'public-read'];
-  const obsAclInput = getInput('obs_acl');
-  const obsAcl = OBS_ACL_WHITELIST.includes(obsAclInput) ? obsAclInput : 'public-read';
-  console.log(`[INFO] OBS 对象 ACL: ${obsAcl}${obsAcl === 'public-read' ? '（默认；后端支持带凭证下载后建议切换 private）' : ''}`);
   // 回调需要的 SARIF 下载 URL 列表（后端 SarifParseServiceImpl 直接按该列表解析，无需 build-result.json）
   const sarifDownloadUrls = sarifUploads.map(u => u.downloadUrl);
   const isSingleFile = sarifFiles.length === 1;
@@ -927,12 +898,12 @@ async function run() {
     const u = sarifUploads[i];
     console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
     try {
-      // ACL 由 obs_acl input 决定（默认 public-read 兼容现有后端匿名下载，见上方说明）
+      // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
       await withRetryAsync(() => client.putObject({
         Bucket: OBS_BUCKET,
         Key: `${u.keyPrefix}/${u.name}`,
         SourceFile: u.file,
-        ACL: obsAcl
+        ACL: 'public-read'
       }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
     } catch (e2) {
       console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);

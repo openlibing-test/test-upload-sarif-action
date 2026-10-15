@@ -112,18 +112,6 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: ""
-  obs_acl:
-    description: "SARIF 对象上传 OBS 时的 ACL（public-read / private）。默认 public-read：当前后端通过匿名 HTTP GET 下载；后端切换为带凭证下载后，配置 private 关闭匿名可读（Ref issues #11/#12）"
-    required: false
-    default: "public-read"
-    layout:
-      type: "input"
-      label: "OBS 对象 ACL"
-      extend_prop:
-        visible_conditions: []
-        disabled_conditions: []
-      validation:
-        required_message: ""
   env_type:
     description: "环境类型：prod（正式环境）/ beta（测试环境）。不传则默认 prod"
     required: false
