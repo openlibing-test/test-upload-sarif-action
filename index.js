@@ -456,31 +456,50 @@ function buildRuleInfoText(r, sarifObj) {
 // ---------- region.snippet 补齐 ----------
 
 /**
- * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到返回 null。
+ * 边界校验（#18/#16 整改，CWE-22 防护）：resolveSourceFile 的解析结果必须落在
+ * sourceRoots（含 workspace 兜底）之内，超出边界的 uri 一律拒绝读取。
+ * SARIF 由扫描工具对 PR 代码运行产生，uri 内容可被恶意 PR 代码影响；
+ * 若不校验，file:// 与绝对路径可读 runner 上任意文件并将内容写入 snippet 随 SARIF 上传。
+ */
+function isWithinRoots(resolved, roots) {
+  return roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+}
+
+/**
+ * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到或越出 sourceRoots 边界返回 null。
  * 依次尝试：绝对路径（file:// 或 / 开头）→ sourceRoots 直接拼接 → 按文件名递归兜底查找。
+ * 所有路径统一 path.resolve 归一化后做前缀校验（阻断 ../ 越界与工作区外绝对路径）。
  */
 function resolveSourceFile(uri, sourceRoots) {
+  const roots = (sourceRoots || []).map((r) => path.resolve(r));
   let p = (uri || '').trim();
   if (!p) return null;
   if (p.startsWith('file://')) {
     try {
-      const filePath = decodeURIComponent(p.replace(/^file:\/\//i, ''));
-      return fs.existsSync(filePath) ? filePath : null;
+      let filePath = decodeURIComponent(p.replace(/^file:\/\//i, ''));
+      // Windows 盘符形式 file:///e:/xxx → e:/xxx（去掉开头的 /，否则 resolve 会归到错误盘根）
+      filePath = filePath.replace(/^\/([a-zA-Z]:)/, '$1');
+      const resolved = path.resolve(filePath);
+      if (!isWithinRoots(resolved, roots)) return null;
+      return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
     } catch (e) {
       return null;
     }
   }
   if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/')) {
-    return fs.existsSync(p) && fs.statSync(p).isFile() ? p : null;
+    const resolved = path.resolve(p);
+    if (!isWithinRoots(resolved, roots)) return null;
+    return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
   }
   p = p.replace(/^\.\//, '').replace(/^\/+/, '');
-  for (const root of sourceRoots) {
-    const cand = path.join(root, p);
+  for (const root of roots) {
+    const cand = path.resolve(root, p); // resolve 归一化，../ 被折叠为真实目标
+    if (cand !== root && !cand.startsWith(root + path.sep)) continue; // 阻断 ../ 越出该根
     if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
   }
   const base = path.basename(p);
   if (base) {
-    for (const root of sourceRoots) {
+    for (const root of roots) {
       const found = findFirst([root, '-name', base, '-type', 'f']);
       if (found) return found;
     }

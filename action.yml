@@ -1,5 +1,5 @@
 name: "openlibing-upload-sarif"
-version: 1.2.16
+version: 1.2.17
 author: "test-devops"
 description: "统一 SARIF 上传插件：将任意工具产出的 SARIF、CodeArts 代码检查报告(Markdown/原生 SARIF)或 CodeArts Check API 拉取的问题明细转换为 SARIF 并上传到 OBS 生成构建产物 JSON（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）"
 
