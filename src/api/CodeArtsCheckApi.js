@@ -134,7 +134,9 @@ class CodeArtsCheckApi {
     this.sk = sk;
     this.token = token;
     this.region = region;
-    this.host = `codecheck-ext.${region}.myhuaweicloud.com`;
+    // host 前缀/域名收敛到集中配置（#10 方案 B），按 region 动态拼
+    const { CODEARTS_HOST_PREFIX, CODEARTS_API_DOMAIN } = require('../config/endpoints');
+    this.host = `${CODEARTS_HOST_PREFIX}.${region}.${CODEARTS_API_DOMAIN}`;
   }
 
   /**

@@ -12,7 +12,7 @@ const { installFetchPolyfill } = __nccwpck_require__(7849);
 // OIDC SDK 会回退 require('undici') 导致 "Cannot find module 'undici'"。
 installFetchPolyfill();
 
-const { execSync } = __nccwpck_require__(5317);
+const { execSync, execFileSync } = __nccwpck_require__(5317);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 const os = __nccwpck_require__(857);
@@ -43,17 +43,17 @@ try {
 const APIG_SIGN_REGION = 'cn-southwest-2'; // APIG V11 签名区域
 const OIDC_API_PREFIX = '/action-api'; // OIDC 回调路径前缀（网关 IAM 认证）
 const CALLBACK_PATH = '/codescan/v1/result/receive';
-// beta.apig.openlibing.com 已确认 DNS 指向华为云 APIG，但证书尚未绑定该域名
-// （TLS 握手返回 *.apic.cn-southwest-2.huaweicloudapis.com 默认证书）。
-// 当前临时使用已发布 /action-api 接口的 APIG 域名，保证链路可测；平台绑定证书后应切回该域名。
-const OIDC_PROD_BASE = 'https://apig.openlibing.com';
-const OIDC_BETA_BASE = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
+// 业务功能性公网端点集中配置（#10 方案 B），默认值见 src/config/endpoints.js；
+// 可通过同名环境变量覆盖（环境切换不改源码）。
+const ENDPOINTS = __nccwpck_require__(3242);
+const OIDC_PROD_BASE = process.env.OIDC_PROD_BASE || ENDPOINTS.OIDC_PROD_BASE;
+const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 
 // OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
 // 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
-const OBS_BUCKET = 'openlibing-gitcode-action';
-const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
+const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
+const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
 
 const REPORT_EXT = ['.md', '.markdown'];
 const SARIF_EXT = ['.sarif'];
@@ -88,12 +88,19 @@ function setOutput(key, value) {
   console.log(`[OUTPUT] ${key}=${value}`);
 }
 
-function execCapture(cmd) {
+/**
+ * find 命令数组传参执行（#20 整改：替代 shell 字符串拼接 + 单点转义，零 shell 解析）。
+ * 返回首个匹配行；无匹配/失败返回 ''。find 对个别子目录无权限时会以非零码退出
+ * 但仍产出部分结果（与原 `2>/dev/null | head -1` 管道行为等价），此时取 e.stdout。
+ */
+function findFirst(args) {
+  let out = '';
   try {
-    return execSync(cmd, { encoding: 'utf-8', shell: '/bin/bash' }).trim();
+    out = execFileSync('find', args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch (e) {
-    return '';
+    out = (e && e.stdout) || '';
   }
+  return (String(out).split('\n').map(s => s.trim()).find(Boolean) || '');
 }
 
 /**
@@ -241,7 +248,7 @@ function resolveReportFiles(reportFile, workspace) {
     const found = tryResolveCandidate(candidate);
     if (found) return found;
   }
-  const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
   if (gitDir) {
     const found = tryResolveCandidate(path.join(path.dirname(gitDir), reportFile));
     if (found) return found;
@@ -455,11 +462,6 @@ function buildRuleInfoText(r, sarifObj) {
 
 // ---------- region.snippet 补齐 ----------
 
-/** shell 单参数转义（用于 find 命令的引号包裹参数，防注入） */
-function escapeShellArg(s) {
-  return String(s).replace(/(["'`$\\])/g, '\\$1');
-}
-
 /**
  * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到返回 null。
  * 依次尝试：绝对路径（file:// 或 / 开头）→ sourceRoots 直接拼接 → 按文件名递归兜底查找。
@@ -486,7 +488,7 @@ function resolveSourceFile(uri, sourceRoots) {
   const base = path.basename(p);
   if (base) {
     for (const root of sourceRoots) {
-      const found = execCapture(`find "${escapeShellArg(root)}" -name "${escapeShellArg(base)}" -type f 2>/dev/null | head -1`);
+      const found = findFirst([root, '-name', base, '-type', 'f']);
       if (found) return found;
     }
   }
@@ -618,7 +620,7 @@ function collectSarifFiles(sarifFile, workspace) {
       p = path.join(workspace, rawPath);
     }
     if (!fs.existsSync(p)) {
-      const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+      const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
       if (gitDir) {
         p = path.join(path.dirname(gitDir), rawPath);
       }
@@ -650,7 +652,7 @@ function collectSarifFiles(sarifFile, workspace) {
 
 /** 解析仓库根目录：优先取 workspace 下 git 仓库根（兼容 repo_workspace 嵌套），兜底 workspace 本身 */
 function resolveRepoRoot(workspace) {
-  const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
   if (gitDir) {
     console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
     return path.dirname(gitDir);
@@ -26428,7 +26430,9 @@ class CodeArtsCheckApi {
     this.sk = sk;
     this.token = token;
     this.region = region;
-    this.host = `codecheck-ext.${region}.myhuaweicloud.com`;
+    // host 前缀/域名收敛到集中配置（#10 方案 B），按 region 动态拼
+    const { CODEARTS_HOST_PREFIX, CODEARTS_API_DOMAIN } = __nccwpck_require__(3242);
+    this.host = `${CODEARTS_HOST_PREFIX}.${region}.${CODEARTS_API_DOMAIN}`;
   }
 
   /**
@@ -26617,6 +26621,37 @@ function parseTaskUrl(url) {
 module.exports = CodeArtsCheckApi;
 module.exports.signRequest = signRequest;
 module.exports.parseTaskUrl = parseTaskUrl;
+
+
+/***/ }),
+
+/***/ 3242:
+/***/ ((module) => {
+
+/**
+ * 业务功能性端点集中配置（安全整改 #10 方案 B：集中配置化）。
+ *
+ * - 默认值与原硬编码值完全一致（等价变换，不改任何对外行为）；
+ * - 环境切换只改本文件（或通过同名环境变量覆盖），不改业务源码；
+ * - 同名环境变量优先级高于本文件默认值（如 OIDC_PROD_BASE）。
+ */
+module.exports = {
+  // OIDC 回调网关（prod 正式环境 / beta 测试环境）
+  // beta 域名说明：beta.apig.openlibing.com 已确认 DNS 指向华为云 APIG，但证书尚未
+  // 绑定该域名（TLS 握手返回 *.apic.cn-southwest-2.huaweicloudapis.com 默认证书）。
+  // 当前临时使用已发布 /action-api 接口的 APIG 域名，保证链路可测；平台绑定证书后应切回。
+  OIDC_PROD_BASE: 'https://apig.openlibing.com',
+  OIDC_BETA_BASE: 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com',
+
+  // OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
+  // 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
+  OBS_BUCKET: 'openlibing-gitcode-action',
+  OBS_READ_ENDPOINT: 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com',
+
+  // CodeArts Check API host（按 region 动态拼：{HOST_PREFIX}.{region}.{API_DOMAIN}）
+  CODEARTS_HOST_PREFIX: 'codecheck-ext',
+  CODEARTS_API_DOMAIN: 'myhuaweicloud.com'
+};
 
 
 /***/ }),
