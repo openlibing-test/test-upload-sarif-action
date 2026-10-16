@@ -124,6 +124,18 @@ inputs:
         disabled_conditions: []
       validation:
         required_message: ""
+  obs_ssl_ca_file:
+    description: "（可选）OBS 上传 TLS 校验的自签 CA 证书文件路径。默认开启 TLS 证书校验（sslVerify: true）；自托管 runner 经企业自签 TLS 代理出网导致校验失败时，配置企业 CA 证书路径即可，无需关闭校验"
+    required: false
+    default: ""
+    layout:
+      type: "input"
+      label: "OBS TLS 自签 CA 证书路径（可选）"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
 
 outputs:
   result:

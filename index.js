@@ -873,11 +873,16 @@ async function run() {
   // esdk-obs-nodejs 的 initFactory 为 fire-and-forget（内部 await refresh 后才设置签名上下文），
   // 构造后立即 putObject 会读到 null signatureContext（Cannot read properties of null (reading 'signature')），
   // 此处让出一个微任务等待初始化完成。
+  // TLS 证书校验（#19 整改）：SDK 默认 sslVerify=false（MITM 可窃取临时凭证与 SARIF 内容），
+  // 此处默认开启校验；企业自签 TLS 代理场景可通过 obs_ssl_ca_file 输入指定 CA 证书
+  // 文件路径（SDK 支持传路径，内部读取为 ca 选项）。
+  const obsSslCaFile = getInput('obs_ssl_ca_file');
   const client = new ObsClient({
     access_key_id: cred.accessKeyId,
     secret_access_key: cred.secretAccessKey,
     security_token: cred.securityToken,
-    server
+    server,
+    sslVerify: obsSslCaFile || true
   });
   await Promise.resolve();
 
