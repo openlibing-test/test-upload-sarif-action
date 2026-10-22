@@ -91,6 +91,6 @@ stages:
 
           - name: Upload UT coverage
             if: ${{ always() }}
-            uses: openlibing/upload-ut-action@v1.0.2
+            uses: openlibing/upload-ut-action@v1.0.0
             with:
               report_dir: coverage/coverage-final.json
