@@ -473,9 +473,26 @@ function isWithinRoots(resolved, roots) {
 }
 
 /**
+ * realpath 终裁（#18/#16 整改回归缺口补齐）：词法前缀校验只比对路径字符串，
+ * 挡不住「路径在界内、目标在界外」的符号链接（fs.statSync/readFileSync 会跟随链接）。
+ * 此处解析真实路径后重做一次边界校验，越界的符号链接返回 null。
+ */
+function confirmWithinRootsRealpath(candidate, roots) {
+  if (!candidate) return null;
+  let real;
+  try {
+    real = fs.realpathSync(candidate);
+  } catch (e) {
+    return null;
+  }
+  return isWithinRoots(real, roots) ? real : null;
+}
+
+/**
  * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到或越出 sourceRoots 边界返回 null。
  * 依次尝试：绝对路径（file:// 或 / 开头）→ sourceRoots 直接拼接 → 按文件名递归兜底查找。
- * 所有路径统一 path.resolve 归一化后做前缀校验（阻断 ../ 越界与工作区外绝对路径）。
+ * 所有路径统一 path.resolve 归一化后做前缀校验（阻断 ../ 越界与工作区外绝对路径），
+ * 最终经 realpath 终裁（阻断指向边界外的符号链接）。
  */
 function resolveSourceFile(uri, sourceRoots) {
   const roots = (sourceRoots || []).map((r) => path.resolve(r));
@@ -488,7 +505,8 @@ function resolveSourceFile(uri, sourceRoots) {
       filePath = filePath.replace(/^\/([a-zA-Z]:)/, '$1');
       const resolved = path.resolve(filePath);
       if (!isWithinRoots(resolved, roots)) return null;
-      return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
+      if (!(fs.existsSync(resolved) && fs.statSync(resolved).isFile())) return null;
+      return confirmWithinRootsRealpath(resolved, roots);
     } catch (e) {
       return null;
     }
@@ -496,19 +514,26 @@ function resolveSourceFile(uri, sourceRoots) {
   if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/')) {
     const resolved = path.resolve(p);
     if (!isWithinRoots(resolved, roots)) return null;
-    return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
+    if (!(fs.existsSync(resolved) && fs.statSync(resolved).isFile())) return null;
+    return confirmWithinRootsRealpath(resolved, roots);
   }
   p = p.replace(/^\.\//, '').replace(/^\/+/, '');
   for (const root of roots) {
     const cand = path.resolve(root, p); // resolve 归一化，../ 被折叠为真实目标
     if (cand !== root && !cand.startsWith(root + path.sep)) continue; // 阻断 ../ 越出该根
-    if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+    if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+      const confirmed = confirmWithinRootsRealpath(cand, roots);
+      if (confirmed) return confirmed;
+    }
   }
   const base = path.basename(p);
   if (base) {
     for (const root of roots) {
       const found = findFirst([root, '-name', base, '-type', 'f']);
-      if (found) return found;
+      if (found) {
+        const confirmed = confirmWithinRootsRealpath(found, roots);
+        if (confirmed) return confirmed;
+      }
     }
   }
   return null;
@@ -545,9 +570,20 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
     if (!problemLines.length) continue;
     let changed = false;
 
-    // 凭证类规则判定（Ref issues #11/#12）：命中则 snippet/上下文中的字符串字面量掩码
+    // 凭证类规则判定（Ref issues #11/#12）：命中则 snippet/上下文/消息中的字符串字面量掩码
     const isCredentialRule = CREDENTIAL_RULE_RE.test(buildRuleInfoText(r, sarifObj));
     const maskText = (text) => (isCredentialRule ? maskCredentialSnippet(text) : text);
+
+    // 3) result.message.text 掩码（#11/#12 整改回归缺口补齐）：bandit 等工具会把
+    //    明文口令写进消息文本（如 B105 `comparison to "123456"`），随 SARIF 上传留存。
+    //    与 snippet 掩码同性质：掩码后与工具原始输出不再逐字一致，前端按行号定位。
+    if (r.message && typeof r.message.text === 'string' && r.message.text) {
+      const maskedMsg = maskText(r.message.text);
+      if (maskedMsg !== r.message.text) {
+        r.message.text = maskedMsg;
+        changed = true;
+      }
+    }
 
     // 1) region.snippet 对齐为问题行本身（前端定位高亮依赖，必须与文件内容一致；
     //    凭证类规则例外——原文即明文凭证，掩码后写入）
