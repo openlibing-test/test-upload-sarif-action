@@ -1,0 +1,96 @@
+name: nightly-schedule-scan
+
+on:
+  schedule:
+    - cron: "0 0 3 * * ?"
+  workflow_dispatch:
+
+permissions:
+  repository: read
+  id-token: write
+
+stages:
+  nightly-scan:
+    name: 夜间扫描
+    fail_fast: false
+    jobs:
+      pre-commit:
+        name: pre-commit
+        runs-on: ["self-hosted", "region=overseas"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              token: ${{ secrets.ROBOT_TOKEN }}
+              ref: main
+
+          - name: setup-go
+            uses: setup-go
+            with:
+              version: 1.26
+              cache: true
+
+          - name: setup-node
+            uses: setup-node
+            with:
+              node-version: 20
+              cache: true
+
+          - name: Install npm dependencies
+            run: npm install
+
+          - name: setup-prettier
+            run: npm install --save-dev --save-exact prettier@3.9.5
+
+          - name: run pre-commit
+            id: pre-commit
+            uses: openlibing/pre-commit-action@v1.0.2
+            with:
+              extra_args: "--all-files"
+              gc_token: ${{ secrets.ROBOT_TOKEN }}
+              report-dir: ./tmp_pre-commit-reports/
+
+          - name: upload sarif reports
+            if: ${{ always() }}
+            uses: openlibing/upload-sarif-action@v1.0.0
+            with:
+              sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
+              source_path: src
+              category: "pre-commit-report"
+
+      ut-coverage:
+        name: UT 覆盖率
+        runs-on: ["self-hosted", "region=cn"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              token: ${{ secrets.ROBOT_TOKEN }}
+
+          - name: Bootstrap tool cache dir (temporary workaround)
+            # 规避 setup 插件在当前执行机上对 /opt/tools 无写权限导致的安装失败
+            run: |
+              if [ ! -d /opt/tools/cache ] || [ ! -w /opt/tools/cache ]; then
+                sudo mkdir -p /opt/tools/cache
+                sudo chown -R "$(id -u):$(id -g)" /opt/tools
+              fi
+              ls -ld /opt/tools /opt/tools/cache
+
+          - name: setup-node
+            uses: setup-node
+            with:
+              node-version: 20
+              cache: true
+
+          - name: Install npm dependencies
+            run: npm install
+
+          - name: Run tests with coverage
+            # node 内置测试运行器（node --test）经 c8 采集 V8 覆盖率，产出 coverage/coverage-final.json
+            run: npx --yes c8@^10 --reporter=text --reporter=json node --test
+
+          - name: Upload UT coverage
+            if: ${{ always() }}
+            uses: openlibing/upload-ut-action@v1.0.0
+            with:
+              report_dir: coverage/coverage-final.json

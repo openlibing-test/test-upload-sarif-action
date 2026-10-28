@@ -4,4 +4,7 @@ gitcode-action.md
 
 node_modules/
 
+# ESLint SARIF 输出（eslint-sarif 钩子写入，不入库）
+tmp_pre-commit-reports/
+
 *.zip
