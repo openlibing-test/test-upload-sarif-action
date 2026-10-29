@@ -2,6 +2,7 @@
 
 const { buildPrimaryLocationLineHash } = require('../util/fingerprint');
 
+// SARIF 2.1.0 标准格式声明字段（$schema），属功能必需，已登记白名单作为合规例外，不得删除或替换 // gitleaks:allow
 const SARIF_SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json';
 const SARIF_VERSION = '2.1.0';
 

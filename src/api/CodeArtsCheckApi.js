@@ -134,7 +134,9 @@ class CodeArtsCheckApi {
     this.sk = sk;
     this.token = token;
     this.region = region;
-    this.host = `codecheck-ext.${region}.myhuaweicloud.com`;
+    // host 前缀/域名收敛到集中配置（#10 方案 B），按 region 动态拼
+    const { CODEARTS_HOST_PREFIX, CODEARTS_API_DOMAIN } = require('../config/endpoints');
+    this.host = `${CODEARTS_HOST_PREFIX}.${region}.${CODEARTS_API_DOMAIN}`;
   }
 
   /**
@@ -284,8 +286,8 @@ class CodeArtsCheckApi {
 
 /**
  * 从 codecheck_gitcode_v2 步骤输出的 codeCheck_task_url 解析 CodeArts 参数
- * 示例:
- * https://devcloud.cn-north-4.huaweicloud.com/codechecknew/project/{projectId}/codecheck/task/{type}/{taskId}/tasklog?jobId={jobId}
+ * 示例（仅注释中的格式说明，非运行时请求地址）:
+ * https://devcloud.cn-north-4.huaweicloud.com/codechecknew/project/{projectId}/codecheck/task/{type}/{taskId}/tasklog?jobId={jobId} // gitleaks:allow 文档示例 URL，运行时 host 由 region 参数动态构造（codecheck-ext.{region}.myhuaweicloud.com）
  * @param {string} url 任务 URL
  * @returns {{projectId: string, taskId: string, jobId: string, region: string}|null} 解析失败返回 null
  */

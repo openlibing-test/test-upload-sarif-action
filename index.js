@@ -5,7 +5,7 @@ const { installFetchPolyfill } = require('./src/util/fetchPolyfill');
 // OIDC SDK 会回退 require('undici') 导致 "Cannot find module 'undici'"。
 installFetchPolyfill();
 
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -36,17 +36,20 @@ try {
 const APIG_SIGN_REGION = 'cn-southwest-2'; // APIG V11 签名区域
 const OIDC_API_PREFIX = '/action-api'; // OIDC 回调路径前缀（网关 IAM 认证）
 const CALLBACK_PATH = '/codescan/v1/result/receive';
-// beta.apig.openlibing.com 已确认 DNS 指向华为云 APIG，但证书尚未绑定该域名
-// （TLS 握手返回 *.apic.cn-southwest-2.huaweicloudapis.com 默认证书）。
-// 当前临时使用已发布 /action-api 接口的 APIG 域名，保证链路可测；平台绑定证书后应切回该域名。
-const OIDC_PROD_BASE = 'https://apig.openlibing.com';
-const OIDC_BETA_BASE = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
+// 业务功能性公网端点集中配置（#10 方案 B），默认值见 src/config/endpoints.js；
+// 可通过同名环境变量覆盖（环境切换不改源码）。
+const ENDPOINTS = require('./src/config/endpoints');
+const OIDC_PROD_BASE = process.env.OIDC_PROD_BASE || ENDPOINTS.OIDC_PROD_BASE;
+const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 
 // OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
 // 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
-const OBS_BUCKET = 'openlibing-gitcode-action';
-const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
+const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
+const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
+// 结果解析查看页（回调成功后的提示链接），集中配置 + 环境变量覆盖（与上面同模式）
+const RESULT_VIEW_BASE = process.env.RESULT_VIEW_BASE || ENDPOINTS.RESULT_VIEW_BASE;
+const RESULT_VIEW_BASE_BETA = process.env.RESULT_VIEW_BASE_BETA || ENDPOINTS.RESULT_VIEW_BASE_BETA;
 
 const REPORT_EXT = ['.md', '.markdown'];
 const SARIF_EXT = ['.sarif'];
@@ -81,12 +84,19 @@ function setOutput(key, value) {
   console.log(`[OUTPUT] ${key}=${value}`);
 }
 
-function execCapture(cmd) {
+/**
+ * find 命令数组传参执行（#20 整改：替代 shell 字符串拼接 + 单点转义，零 shell 解析）。
+ * 返回首个匹配行；无匹配/失败返回 ''。find 对个别子目录无权限时会以非零码退出
+ * 但仍产出部分结果（与原 `2>/dev/null | head -1` 管道行为等价），此时取 e.stdout。
+ */
+function findFirst(args) {
+  let out = '';
   try {
-    return execSync(cmd, { encoding: 'utf-8', shell: '/bin/bash' }).trim();
+    out = execFileSync('find', args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch (e) {
-    return '';
+    out = (e && e.stdout) || '';
   }
+  return (String(out).split('\n').map(s => s.trim()).find(Boolean) || '');
 }
 
 /**
@@ -234,7 +244,7 @@ function resolveReportFiles(reportFile, workspace) {
     const found = tryResolveCandidate(candidate);
     if (found) return found;
   }
-  const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
   if (gitDir) {
     const found = tryResolveCandidate(path.join(path.dirname(gitDir), reportFile));
     if (found) return found;
@@ -402,41 +412,124 @@ function buildToolPrefix(toolName) {
   return safe ? `${safe}-results` : OBS_KEY_ROOT;
 }
 
-// ---------- region.snippet 补齐 ----------
+// ---------- 凭证类规则 snippet 掩码（Ref issues #11/#12） ----------
 
-/** shell 单参数转义（用于 find 命令的引号包裹参数，防注入） */
-function escapeShellArg(s) {
-  return String(s).replace(/(["'`$\\])/g, '\\$1');
+/** 凭证类规则关键字：result 的规则 ID/规则描述/消息命中即视为凭证类检出，
+ * 对应 snippet 中的字符串字面量按疑似明文凭证掩码。 */
+const CREDENTIAL_RULE_RE = /(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|credential|auth|硬编码口令|密码|密钥|口令|凭证)/i;
+
+/** 掩码单个疑似凭证字面量：保留前 2 后 2 字符，中间以 *** 替代；长度 <= 6 整体掩码 */
+function maskLiteralBody(body) {
+  if (!body) return body;
+  if (body.length <= 6) return '***';
+  return body.slice(0, 2) + '***' + body.slice(-2);
 }
 
 /**
- * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到返回 null。
+ * 凭证类规则 snippet 掩码（Ref issues #11/#12）：命中"硬编码口令/密钥"类规则时，
+ * 问题行源码原文（如 String password = "123456"）本身就是明文凭证，随 SARIF
+ * 上传 OBS 后形成多副本长期留存。此处对 snippet 按行处理，行内引号包裹的
+ * 非空字符串字面量替换为保留前 2 后 2 + *** 的掩码形态。
+ * 注意：掩码后 snippet 与源码不再逐字一致，前端内容匹配高亮对凭证类检出
+ * 会退化为按行号定位——安全优先，属预期取舍。
+ */
+function maskCredentialSnippet(text) {
+  return String(text || '').split('\n').map(line => line.replace(
+    /(["'])((?:(?!\1)[^\n])+?)\1/g,
+    (whole, q, body) => (body.trim() ? q + maskLiteralBody(body.trim()) + q : whole)
+  )).join('\n');
+}
+
+/** 拼装 result 的规则判定素材：ruleId + 规则描述 + 消息文本，供凭证规则匹配 */
+function buildRuleInfoText(r, sarifObj) {
+  const rules = sarifObj && sarifObj.runs && sarifObj.runs[0] && sarifObj.runs[0].tool &&
+    sarifObj.runs[0].tool.driver && sarifObj.runs[0].tool.driver.rules;
+  let ruleDesc = '';
+  if (Array.isArray(rules) && r.ruleIndex != null && rules[r.ruleIndex]) {
+    const rule = rules[r.ruleIndex];
+    ruleDesc = [
+      rule.name || '',
+      (rule.shortDescription && rule.shortDescription.text) || '',
+      (rule.fullDescription && rule.fullDescription.text) || ''
+    ].join(' ');
+  }
+  return `${r.ruleId || ''} ${ruleDesc} ${(r.message && r.message.text) || ''}`;
+}
+
+// ---------- region.snippet 补齐 ----------
+
+/**
+ * 边界校验（#18/#16 整改，CWE-22 防护）：resolveSourceFile 的解析结果必须落在
+ * sourceRoots（含 workspace 兜底）之内，超出边界的 uri 一律拒绝读取。
+ * SARIF 由扫描工具对 PR 代码运行产生，uri 内容可被恶意 PR 代码影响；
+ * 若不校验，file:// 与绝对路径可读 runner 上任意文件并将内容写入 snippet 随 SARIF 上传。
+ */
+function isWithinRoots(resolved, roots) {
+  return roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+}
+
+/**
+ * realpath 终裁（#18/#16 整改回归缺口补齐）：词法前缀校验只比对路径字符串，
+ * 挡不住「路径在界内、目标在界外」的符号链接（fs.statSync/readFileSync 会跟随链接）。
+ * 此处解析真实路径后重做一次边界校验，越界的符号链接返回 null。
+ */
+function confirmWithinRootsRealpath(candidate, roots) {
+  if (!candidate) return null;
+  let real;
+  try {
+    real = fs.realpathSync(candidate);
+  } catch (e) {
+    return null;
+  }
+  return isWithinRoots(real, roots) ? real : null;
+}
+
+/**
+ * 将 SARIF uri 解析为源码根目录下的真实文件路径；找不到或越出 sourceRoots 边界返回 null。
  * 依次尝试：绝对路径（file:// 或 / 开头）→ sourceRoots 直接拼接 → 按文件名递归兜底查找。
+ * 所有路径统一 path.resolve 归一化后做前缀校验（阻断 ../ 越界与工作区外绝对路径），
+ * 最终经 realpath 终裁（阻断指向边界外的符号链接）。
  */
 function resolveSourceFile(uri, sourceRoots) {
+  const roots = (sourceRoots || []).map((r) => path.resolve(r));
   let p = (uri || '').trim();
   if (!p) return null;
   if (p.startsWith('file://')) {
     try {
-      const filePath = decodeURIComponent(p.replace(/^file:\/\//i, ''));
-      return fs.existsSync(filePath) ? filePath : null;
+      let filePath = decodeURIComponent(p.replace(/^file:\/\//i, ''));
+      // Windows 盘符形式 file:///e:/xxx → e:/xxx（去掉开头的 /，否则 resolve 会归到错误盘根）
+      filePath = filePath.replace(/^\/([a-zA-Z]:)/, '$1');
+      const resolved = path.resolve(filePath);
+      if (!isWithinRoots(resolved, roots)) return null;
+      if (!(fs.existsSync(resolved) && fs.statSync(resolved).isFile())) return null;
+      return confirmWithinRootsRealpath(resolved, roots);
     } catch (e) {
       return null;
     }
   }
   if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/')) {
-    return fs.existsSync(p) && fs.statSync(p).isFile() ? p : null;
+    const resolved = path.resolve(p);
+    if (!isWithinRoots(resolved, roots)) return null;
+    if (!(fs.existsSync(resolved) && fs.statSync(resolved).isFile())) return null;
+    return confirmWithinRootsRealpath(resolved, roots);
   }
   p = p.replace(/^\.\//, '').replace(/^\/+/, '');
-  for (const root of sourceRoots) {
-    const cand = path.join(root, p);
-    if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+  for (const root of roots) {
+    const cand = path.resolve(root, p); // resolve 归一化，../ 被折叠为真实目标
+    if (cand !== root && !cand.startsWith(root + path.sep)) continue; // 阻断 ../ 越出该根
+    if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+      const confirmed = confirmWithinRootsRealpath(cand, roots);
+      if (confirmed) return confirmed;
+    }
   }
   const base = path.basename(p);
   if (base) {
-    for (const root of sourceRoots) {
-      const found = execCapture(`find "${escapeShellArg(root)}" -name "${escapeShellArg(base)}" -type f 2>/dev/null | head -1`);
-      if (found) return found;
+    for (const root of roots) {
+      const found = findFirst([root, '-name', base, '-type', 'f']);
+      if (found) {
+        const confirmed = confirmWithinRootsRealpath(found, roots);
+        if (confirmed) return confirmed;
+      }
     }
   }
   return null;
@@ -473,20 +566,36 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
     if (!problemLines.length) continue;
     let changed = false;
 
-    // 1) region.snippet 对齐为问题行本身（前端定位高亮依赖，必须与文件内容一致）
-    const problemText = problemLines.join('\n');
+    // 凭证类规则判定（Ref issues #11/#12）：命中则 snippet/上下文/消息中的字符串字面量掩码
+    const isCredentialRule = CREDENTIAL_RULE_RE.test(buildRuleInfoText(r, sarifObj));
+    const maskText = (text) => (isCredentialRule ? maskCredentialSnippet(text) : text);
+
+    // 3) result.message.text 掩码（#11/#12 整改回归缺口补齐）：bandit 等工具会把
+    //    明文口令写进消息文本（如 B105 `comparison to "123456"`），随 SARIF 上传留存。
+    //    与 snippet 掩码同性质：掩码后与工具原始输出不再逐字一致，前端按行号定位。
+    if (r.message && typeof r.message.text === 'string' && r.message.text) {
+      const maskedMsg = maskText(r.message.text);
+      if (maskedMsg !== r.message.text) {
+        r.message.text = maskedMsg;
+        changed = true;
+      }
+    }
+
+    // 1) region.snippet 对齐为问题行本身（前端定位高亮依赖，必须与文件内容一致；
+    //    凭证类规则例外——原文即明文凭证，掩码后写入）
+    const problemText = maskText(problemLines.join('\n'));
     if (!region.snippet || region.snippet.text !== problemText) {
       region.snippet = { text: problemText };
       changed = true;
     }
 
     // 2) contextRegion：固定为问题范围上下各 2 行的窗口（越界自动裁剪），前端展示统一 5 行；
-    //    工具自带的不同窗口（如 3 行）也一律覆盖对齐
+    //    工具自带的不同窗口（如 3 行）也一律覆盖对齐；凭证类规则同步掩码
     const ctxStart = Math.max(1, startLine - 2);
     const ctxEnd = Math.min(lines.length, endLine + 2);
     const ctxLines = lines.slice(ctxStart - 1, ctxEnd);
     if (ctxLines.length) {
-      const ctxText = ctxLines.join('\n');
+      const ctxText = maskText(ctxLines.join('\n'));
       const hasCtxSnippet =
         loc.contextRegion && loc.contextRegion.snippet && loc.contextRegion.snippet.text;
       if (!hasCtxSnippet || loc.contextRegion.snippet.text !== ctxText) {
@@ -504,12 +613,16 @@ function enrichRegionSnippet(sarifObj, sourceRoots) {
   return enriched;
 }
 
-/** 遍历 SARIF 文件，缺少 region.snippet / contextRegion 时补齐并写回原文件 */
+/** 遍历 SARIF 文件，缺少 region.snippet / contextRegion 时补齐并写回原文件。
+ * Ref issues #11：仅在补齐/掩码导致内容实际变化时回写，避免对用户工作区
+ * SARIF 文件做无条件重写（JSON 重排也会改变文件内容）。 */
 function enrichSarifFiles(sarifFiles, sourceRoots) {
   for (const f of sarifFiles) {
     let sarifObj;
+    let originalContent;
     try {
-      sarifObj = JSON.parse(fs.readFileSync(f, 'utf-8'));
+      originalContent = fs.readFileSync(f, 'utf-8');
+      sarifObj = JSON.parse(originalContent);
     } catch (e) {
       console.log(`[WARN] 无法解析 SARIF: ${path.basename(f)}，跳过代码片段补齐`);
       continue;
@@ -558,7 +671,7 @@ function collectSarifFiles(sarifFile, workspace) {
       p = path.join(workspace, rawPath);
     }
     if (!fs.existsSync(p)) {
-      const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+      const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
       if (gitDir) {
         p = path.join(path.dirname(gitDir), rawPath);
       }
@@ -590,7 +703,7 @@ function collectSarifFiles(sarifFile, workspace) {
 
 /** 解析仓库根目录：优先取 workspace 下 git 仓库根（兼容 repo_workspace 嵌套），兜底 workspace 本身 */
 function resolveRepoRoot(workspace) {
-  const gitDir = execCapture(`find "${escapeShellArg(workspace)}" -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
   if (gitDir) {
     console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
     return path.dirname(gitDir);
@@ -818,11 +931,16 @@ async function run() {
   // esdk-obs-nodejs 的 initFactory 为 fire-and-forget（内部 await refresh 后才设置签名上下文），
   // 构造后立即 putObject 会读到 null signatureContext（Cannot read properties of null (reading 'signature')），
   // 此处让出一个微任务等待初始化完成。
+  // TLS 证书校验（#19 整改）：SDK 默认 sslVerify=false（MITM 可窃取临时凭证与 SARIF 内容），
+  // 此处默认开启校验；企业自签 TLS 代理场景可通过 obs_ssl_ca_file 输入指定 CA 证书
+  // 文件路径（SDK 支持传路径，内部读取为 ca 选项）。
+  const obsSslCaFile = getInput('obs_ssl_ca_file');
   const client = new ObsClient({
     access_key_id: cred.accessKeyId,
     secret_access_key: cred.secretAccessKey,
     security_token: cred.securityToken,
-    server
+    server,
+    sslVerify: obsSslCaFile || true
   });
   await Promise.resolve();
 
@@ -877,7 +995,7 @@ async function run() {
     const callbackResult = await withRetryAsync(() => sendCallbackOidc(callbackUrl, callbackPayload, cred), { label: 'APIG 回调' });
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
-    const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
+    const resultViewUrl = isBetaEnv ? RESULT_VIEW_BASE_BETA : RESULT_VIEW_BASE;
     console.log(`查看上传结果解析: ${resultViewUrl}`);
   } catch (err) {
     console.log(`[WARN] 回调通知发送失败: ${err.message}`);
