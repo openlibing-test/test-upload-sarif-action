@@ -47,6 +47,9 @@ const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
 const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
 const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
+// 结果解析查看页（回调成功后的提示链接），集中配置 + 环境变量覆盖（与上面同模式）
+const RESULT_VIEW_BASE = process.env.RESULT_VIEW_BASE || ENDPOINTS.RESULT_VIEW_BASE;
+const RESULT_VIEW_BASE_BETA = process.env.RESULT_VIEW_BASE_BETA || ENDPOINTS.RESULT_VIEW_BASE_BETA;
 
 const REPORT_EXT = ['.md', '.markdown'];
 const SARIF_EXT = ['.sarif'];

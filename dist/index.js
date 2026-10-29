@@ -54,6 +54,9 @@ const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
 const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
 const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
+// 结果解析查看页（回调成功后的提示链接），集中配置 + 环境变量覆盖（与上面同模式）
+const RESULT_VIEW_BASE = process.env.RESULT_VIEW_BASE || ENDPOINTS.RESULT_VIEW_BASE;
+const RESULT_VIEW_BASE_BETA = process.env.RESULT_VIEW_BASE_BETA || ENDPOINTS.RESULT_VIEW_BASE_BETA;
 
 const REPORT_EXT = ['.md', '.markdown'];
 const SARIF_EXT = ['.sarif'];
@@ -2817,7 +2820,7 @@ exports.colors = [6, 2, 3, 4, 5, 1];
 try {
 	// Optional dependency (as in, doesn't need to be installed, NOT like optionalDependencies in package.json)
 	// eslint-disable-next-line import/no-extraneous-dependencies
-	const supportsColor = __nccwpck_require__(75);
+	const supportsColor = __nccwpck_require__(1450);
 
 	if (supportsColor && (supportsColor.stderr || supportsColor).level >= 2) {
 		exports.colors = [
@@ -22028,6 +22031,22 @@ function patch (fs) {
 
 /***/ }),
 
+/***/ 3813:
+/***/ ((module) => {
+
+"use strict";
+
+
+module.exports = (flag, argv = process.argv) => {
+	const prefix = flag.startsWith('-') ? '' : (flag.length === 1 ? '-' : '--');
+	const position = argv.indexOf(prefix + flag);
+	const terminatorPosition = argv.indexOf('--');
+	return position !== -1 && (terminatorPosition === -1 || position < terminatorPosition);
+};
+
+
+/***/ }),
+
 /***/ 2064:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -26317,6 +26336,149 @@ module.exports = () => new Date();
 
 /***/ }),
 
+/***/ 1450:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+const os = __nccwpck_require__(857);
+const tty = __nccwpck_require__(2018);
+const hasFlag = __nccwpck_require__(3813);
+
+const {env} = process;
+
+let forceColor;
+if (hasFlag('no-color') ||
+	hasFlag('no-colors') ||
+	hasFlag('color=false') ||
+	hasFlag('color=never')) {
+	forceColor = 0;
+} else if (hasFlag('color') ||
+	hasFlag('colors') ||
+	hasFlag('color=true') ||
+	hasFlag('color=always')) {
+	forceColor = 1;
+}
+
+if ('FORCE_COLOR' in env) {
+	if (env.FORCE_COLOR === 'true') {
+		forceColor = 1;
+	} else if (env.FORCE_COLOR === 'false') {
+		forceColor = 0;
+	} else {
+		forceColor = env.FORCE_COLOR.length === 0 ? 1 : Math.min(parseInt(env.FORCE_COLOR, 10), 3);
+	}
+}
+
+function translateLevel(level) {
+	if (level === 0) {
+		return false;
+	}
+
+	return {
+		level,
+		hasBasic: true,
+		has256: level >= 2,
+		has16m: level >= 3
+	};
+}
+
+function supportsColor(haveStream, streamIsTTY) {
+	if (forceColor === 0) {
+		return 0;
+	}
+
+	if (hasFlag('color=16m') ||
+		hasFlag('color=full') ||
+		hasFlag('color=truecolor')) {
+		return 3;
+	}
+
+	if (hasFlag('color=256')) {
+		return 2;
+	}
+
+	if (haveStream && !streamIsTTY && forceColor === undefined) {
+		return 0;
+	}
+
+	const min = forceColor || 0;
+
+	if (env.TERM === 'dumb') {
+		return min;
+	}
+
+	if (process.platform === 'win32') {
+		// Windows 10 build 10586 is the first Windows release that supports 256 colors.
+		// Windows 10 build 14931 is the first release that supports 16m/TrueColor.
+		const osRelease = os.release().split('.');
+		if (
+			Number(osRelease[0]) >= 10 &&
+			Number(osRelease[2]) >= 10586
+		) {
+			return Number(osRelease[2]) >= 14931 ? 3 : 2;
+		}
+
+		return 1;
+	}
+
+	if ('CI' in env) {
+		if (['TRAVIS', 'CIRCLECI', 'APPVEYOR', 'GITLAB_CI', 'GITHUB_ACTIONS', 'BUILDKITE'].some(sign => sign in env) || env.CI_NAME === 'codeship') {
+			return 1;
+		}
+
+		return min;
+	}
+
+	if ('TEAMCITY_VERSION' in env) {
+		return /^(9\.(0*[1-9]\d*)\.|\d{2,}\.)/.test(env.TEAMCITY_VERSION) ? 1 : 0;
+	}
+
+	if (env.COLORTERM === 'truecolor') {
+		return 3;
+	}
+
+	if ('TERM_PROGRAM' in env) {
+		const version = parseInt((env.TERM_PROGRAM_VERSION || '').split('.')[0], 10);
+
+		switch (env.TERM_PROGRAM) {
+			case 'iTerm.app':
+				return version >= 3 ? 3 : 2;
+			case 'Apple_Terminal':
+				return 2;
+			// No default
+		}
+	}
+
+	if (/-256(color)?$/i.test(env.TERM)) {
+		return 2;
+	}
+
+	if (/^screen|^xterm|^vt100|^vt220|^rxvt|color|ansi|cygwin|linux/i.test(env.TERM)) {
+		return 1;
+	}
+
+	if ('COLORTERM' in env) {
+		return 1;
+	}
+
+	return min;
+}
+
+function getSupportLevel(stream) {
+	const level = supportsColor(stream, stream && stream.isTTY);
+	return translateLevel(level);
+}
+
+module.exports = {
+	supportsColor: getSupportLevel,
+	stdout: translateLevel(supportsColor(true, tty.isatty(1))),
+	stderr: translateLevel(supportsColor(true, tty.isatty(2)))
+};
+
+
+/***/ }),
+
 /***/ 5077:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -27434,14 +27596,6 @@ function buildPrimaryLocationLineHash(uri, startLine, snippetText) {
 }
 
 module.exports = { buildPrimaryLocationLineHash };
-
-
-/***/ }),
-
-/***/ 75:
-/***/ ((module) => {
-
-module.exports = eval("require")("supports-color");
 
 
 /***/ }),
