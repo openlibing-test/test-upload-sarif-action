@@ -992,7 +992,7 @@ async function run() {
     const callbackResult = await withRetryAsync(() => sendCallbackOidc(callbackUrl, callbackPayload, cred), { label: 'APIG 回调' });
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
-    const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
+    const resultViewUrl = isBetaEnv ? RESULT_VIEW_BASE_BETA : RESULT_VIEW_BASE;
     console.log(`查看上传结果解析: ${resultViewUrl}`);
   } catch (err) {
     console.log(`[WARN] 回调通知发送失败: ${err.message}`);

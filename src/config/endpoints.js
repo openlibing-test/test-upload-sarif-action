@@ -20,5 +20,9 @@ module.exports = {
 
   // CodeArts Check API host（按 region 动态拼：{HOST_PREFIX}.{region}.{API_DOMAIN}）
   CODEARTS_HOST_PREFIX: 'codecheck-ext',
-  CODEARTS_API_DOMAIN: 'myhuaweicloud.com'
+  CODEARTS_API_DOMAIN: 'myhuaweicloud.com',
+
+  // 结果解析查看页（回调成功后的 console 提示链接，prod / beta）
+  RESULT_VIEW_BASE: 'https://www.openlibing.com/apps/codeCheck',
+  RESULT_VIEW_BASE_BETA: 'https://beta.openlibing.com/apps/codeCheck'
 };

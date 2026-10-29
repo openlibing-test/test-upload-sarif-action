@@ -999,7 +999,7 @@ async function run() {
     const callbackResult = await withRetryAsync(() => sendCallbackOidc(callbackUrl, callbackPayload, cred), { label: 'APIG 回调' });
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
-    const resultViewUrl = isBetaEnv ? 'https://beta.openlibing.com/apps/codeCheck' : 'https://www.openlibing.com/apps/codeCheck';
+    const resultViewUrl = isBetaEnv ? RESULT_VIEW_BASE_BETA : RESULT_VIEW_BASE;
     console.log(`查看上传结果解析: ${resultViewUrl}`);
   } catch (err) {
     console.log(`[WARN] 回调通知发送失败: ${err.message}`);
@@ -26710,7 +26710,11 @@ module.exports = {
 
   // CodeArts Check API host（按 region 动态拼：{HOST_PREFIX}.{region}.{API_DOMAIN}）
   CODEARTS_HOST_PREFIX: 'codecheck-ext',
-  CODEARTS_API_DOMAIN: 'myhuaweicloud.com'
+  CODEARTS_API_DOMAIN: 'myhuaweicloud.com',
+
+  // 结果解析查看页（回调成功后的 console 提示链接，prod / beta）
+  RESULT_VIEW_BASE: 'https://www.openlibing.com/apps/codeCheck',
+  RESULT_VIEW_BASE_BETA: 'https://beta.openlibing.com/apps/codeCheck'
 };
 
 
