@@ -7,4 +7,7 @@ node_modules/
 # ESLint SARIF 输出（eslint-sarif 钩子写入，不入库）
 tmp_pre-commit-reports/
 
+# 覆盖率报告产物（npm test / c8 生成）
+coverage/
+
 *.zip

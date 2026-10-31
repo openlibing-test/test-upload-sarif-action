@@ -1,0 +1,86 @@
+name: ut
+
+on:
+  workflow_dispatch:
+  push: # master 分支推送触发 UT
+    branches:
+      - master
+  # fork PR 跑 UT 需读取基仓库 secrets，pull_request 事件下 fork PR 无 secrets 权限，故使用 pull_request_target
+  pull_request_target: # PR 触发 UT
+    branches:
+      - "*"
+  pull_request_comment: # PR 评论 /ut 触发 UT
+    types: [created]
+    comments: ["/ut"]
+    branches:
+      - "*"
+
+permissions:
+  repository: read # checkout 插件最低权限要求
+  id-token: write # upload-ut-action OIDC 上传需要
+
+env:
+  # UT增量行覆盖率门禁阈值：低于该值 PR 流水线失败，可通过仓库变量覆盖，未配置默认 80
+  UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD: ${{ vars.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD || '80' }}
+  # UT报告输出目录：当前为 c8 插件默认输出路径，自定义 reporter 输出时需同步调整
+  UT_REPORT_DIR: coverage/
+  # PR 触发场景标记：覆盖率上报仅 push/手动触发执行
+  IS_PR_EVENT: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
+
+jobs:
+  ut:
+    name: ut
+    runs-on: ["self-hosted", "region=cn"]
+    steps:
+      - name: checkout
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }} # PR 场景检出预合并 commit（验证合入默认分支后的最终状态），push/手动场景为空走默认检出
+          fetch-depth: 0 # 全量检出以生成基线分支远端 ref，供增量覆盖率比较
+          allow-unsafe-pr-checkout: true # 允许 fork PR 场景检出 PR 代码（平台默认拦截）
+
+      - name: setup-node
+        uses: setup-node
+        with:
+          node-version: 20
+          cache: true
+
+      - name: setup-python
+        uses: setup-python
+        with:
+          version: 3.14.3
+
+      # c8 采集覆盖率并生成双格式报告：coverage-final.json（上报平台）+ cobertura-coverage.xml（增量门禁）
+      - name: ut
+        run: |
+          npm ci
+          npm test
+
+      # 将ut报告上传至openlibing平台运营，插件自动识别 c8 格式
+      - name: upload ut report to openlibing
+        if: ${{ always() && env.IS_PR_EVENT != 'true' }}
+        uses: openlibing/upload-ut-action@v1.0.0
+        with:
+          report_dir: ${{ env.UT_REPORT_DIR }}
+
+      # PR场景做增量覆盖率门禁，低于阈值流水线失败；基线为 PR 目标分支，其远端 ref 由 checkout 全量检出生成；diff-cover 原生支持 cobertura 格式
+      - name: diff coverage check
+        if: ${{ env.IS_PR_EVENT == 'true' }}
+        run: |
+          pip install diff-cover
+          diff-cover ${{ env.UT_REPORT_DIR }}cobertura-coverage.xml --compare-branch origin/$ATOMGIT_BASE_REF --fail-under ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }} --html-report ${{ env.UT_REPORT_DIR }}diff-coverage.html || {
+            echo "[UT 增量行覆盖率门禁] 未达标：目标 >= ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }}%，实际值见上方 Coverage"
+            echo "[UT 增量行覆盖率门禁] 请为本次变更代码补充单元测试后重新触发"
+            exit 1
+          }
+
+      # PR场景上传完整覆盖率报告（diff-coverage.html 增量明细 + c8 全量报告），打包为 zip 供下载；1 天后自动清理避免配额累积
+      - name: upload diff coverage report
+        if: ${{ always() && env.IS_PR_EVENT == 'true' }} # 门禁失败场景也需可下载报告
+        uses: upload-artifact
+        with:
+          name: coverage-report
+          path: ${{ env.UT_REPORT_DIR }}
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 1

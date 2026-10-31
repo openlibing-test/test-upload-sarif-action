@@ -1,0 +1,42 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push: # master 分支推送触发构建
+    branches:
+      - master
+  # fork PR 构建需读取基仓库 secrets，pull_request 事件下 fork PR 无 secrets 权限，故使用 pull_request_target
+  pull_request_target: # PR 触发构建验证
+    branches:
+      - "*"
+  pull_request_comment: # PR 评论 /build 触发构建验证
+    types: [created]
+    comments: ["/build"]
+    branches:
+      - "*"
+
+permissions:
+  repository: read # checkout 插件最低权限要求
+
+jobs:
+  build:
+    name: build
+    runs-on: ["self-hosted", "region=cn"]
+    steps:
+      - name: checkout
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }} # PR 场景检出预合并 commit（验证合入默认分支后的最终状态），push/手动场景为空走默认检出
+          allow-unsafe-pr-checkout: true # 允许 fork PR 场景检出 PR 代码（平台默认拦截）
+
+      - name: setup-node
+        uses: setup-node
+        with:
+          node-version: 20
+          cache: true
+
+      # npm ci 按 lockfile 精确安装依赖后执行完整构建链（ncc 打包 + zip），验证产物可正常生成；依赖均为公共包，无需私仓凭证
+      - name: build
+        run: |
+          npm ci
+          npm run build
