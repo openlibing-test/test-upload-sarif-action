@@ -29,6 +29,14 @@ jobs:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }} # PR 场景检出预合并 commit（验证合入默认分支后的最终状态），push/手动场景为空走默认检出
           allow-unsafe-pr-checkout: true # 允许 fork PR 场景检出 PR 代码（平台默认拦截）
 
+      # 官方插件存在 tool cache 目录权限缺陷（/opt/tools 无写权限时安装失败 EACCES），插件修复前在此临时规避
+      - name: bootstrap tool cache dir
+        run: |
+          if [ ! -d /opt/tools ] || [ ! -w /opt/tools ]; then
+            sudo mkdir -p /opt/tools/cache
+            sudo chown -R "$(id -u):$(id -g)" /opt/tools
+          fi
+
       - name: setup-node
         uses: setup-node
         with:
