@@ -5,8 +5,7 @@ on:
   push: # main 分支推送触发构建
     branches:
       - main
-  # fork PR 构建需读取基仓库 secrets，pull_request 事件下 fork PR 无 secrets 权限，故使用 pull_request_target
-  pull_request_target: # PR 触发构建验证
+  pull_request: # PR 触发构建验证
     branches:
       - "*"
   pull_request_comment: # PR 评论 /build 触发构建验证
@@ -27,7 +26,6 @@ jobs:
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || '' }} # PR 场景检出预合并 commit（验证合入默认分支后的最终状态），push/手动场景为空走默认检出
-          allow-unsafe-pr-checkout: true # 允许 fork PR 场景检出 PR 代码（平台默认拦截）
 
       # setup-node 官方插件存在 tool cache 目录权限缺陷（/opt/tools/cache 无写权限时安装失败 EACCES），插件修复前在此临时规避
       - name: bootstrap tool cache dir
