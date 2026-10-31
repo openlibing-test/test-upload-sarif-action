@@ -77,8 +77,7 @@ jobs:
         run: |
           pip install diff-cover
           diff-cover ${{ env.UT_REPORT_DIR }}cobertura-coverage.xml --compare-branch origin/$ATOMGIT_BASE_REF --fail-under ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }} --html-report ${{ env.UT_REPORT_DIR }}diff-coverage.html || {
-            echo "[UT 增量行覆盖率门禁] 未达标：目标 >= ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }}%，实际值见上方 Coverage"
-            echo "[UT 增量行覆盖率门禁] 请为本次变更代码补充单元测试后重新触发"
+            echo "[UT 增量行覆盖率门禁] 未达标：目标 >= ${{ env.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD }}%，实际值见上方 Coverage，请为本次变更代码补充单元测试后重新触发"
             exit 1
           }
 

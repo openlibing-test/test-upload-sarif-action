@@ -5,7 +5,8 @@ on:
   push: # 推送时也执行 pre-commit 检查
     branches:
       - main
-  pull_request_target: ## 使用 pull_request_target 确保 PR 流水线始终读取默认分支（main）的最新配置文件
+  # 使用 pull_request_target 确保 PR 流水线始终读取默认分支（main）的最新配置文件
+  pull_request_target:
     branches:
       - "*"
   pull_request_comment:
@@ -41,7 +42,7 @@ stages:
         name: pre-commit
         runs-on: ["self-hosted", "region=overseas"]
         steps:
-          - name: Checkout repository
+          - name: checkout
             uses: checkout
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
@@ -53,7 +54,7 @@ stages:
               node-version: 20
               cache: true
 
-          - name: Install npm dependencies
+          - name: install npm dependencies
             run: npm install
 
           - name: setup-prettier
