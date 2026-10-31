@@ -2,9 +2,9 @@ name: ut
 
 on:
   workflow_dispatch:
-  push: # master 分支推送触发 UT
+  push: # main 分支推送触发 UT
     branches:
-      - master
+      - main
   # fork PR 跑 UT 需读取基仓库 secrets，pull_request 事件下 fork PR 无 secrets 权限，故使用 pull_request_target
   pull_request_target: # PR 触发 UT
     branches:
