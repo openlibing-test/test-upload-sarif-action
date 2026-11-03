@@ -5,6 +5,13 @@ const https = require('https');
 
 const ALGORITHM = 'SDK-HMAC-SHA256';
 
+/** 日志清洗（Ref #31）：剔除 \r\n 与不可见控制字符，
+ * 防止服务端响应等外部可控内容在 CI 日志中注入伪造行。 */
+function sanitizeLogValue(value) {
+  // eslint-disable-next-line no-control-regex
+  return String(value).replace(/[\r\n\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+}
+
 // 华为云问题级别（defectLevel）-> 华为云报告中文级别
 const SEVERITY_MAP = {
   '0': '致命',
@@ -170,17 +177,17 @@ class CodeArtsCheckApi {
       headers: { ...headers, ...signed }
     };
 
-    console.log(`[INFO] CodeArts Check API 请求: ${method} https://${this.host}${options.path} | 认证: ${this.token ? 'OIDC 临时凭证 + X-Security-Token' : 'AK/SK 签名'}`);
+    console.log(`[INFO] CodeArts Check API 请求: ${sanitizeLogValue(method)} https://${sanitizeLogValue(this.host)}${sanitizeLogValue(options.path)} | 认证: ${this.token ? 'OIDC 临时凭证 + X-Security-Token' : 'AK/SK 签名'}`);
 
     const resp = await httpsRequest(options, payload);
     let data;
     try {
       data = JSON.parse(resp.body || '{}');
     } catch (e) {
-      throw new Error(`CodeArts Check API 响应不是合法 JSON (HTTP ${resp.status}): ${resp.body.slice(0, 200)}`);
+      throw new Error(`CodeArts Check API 响应不是合法 JSON (HTTP ${resp.status}): ${sanitizeLogValue(resp.body.slice(0, 200))}`);
     }
     if (resp.status < 200 || resp.status >= 300) {
-      throw new Error(`CodeArts Check API HTTP ${resp.status}: ${resp.body.slice(0, 300)}`);
+      throw new Error(`CodeArts Check API HTTP ${resp.status}: ${sanitizeLogValue(resp.body.slice(0, 300))}`);
     }
     return data;
   }
