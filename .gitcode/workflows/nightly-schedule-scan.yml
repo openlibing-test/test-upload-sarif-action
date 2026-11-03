@@ -21,7 +21,6 @@ stages:
           - name: Checkout repository
             uses: checkout
             with:
-              token: ${{ secrets.ROBOT_TOKEN }}
               ref: main
 
           - name: setup-go
@@ -64,8 +63,6 @@ stages:
         steps:
           - name: Checkout repository
             uses: checkout
-            with:
-              token: ${{ secrets.ROBOT_TOKEN }}
 
           - name: Bootstrap tool cache dir (temporary workaround)
             # 规避 setup 插件在当前执行机上对 /opt/tools 无写权限导致的安装失败
