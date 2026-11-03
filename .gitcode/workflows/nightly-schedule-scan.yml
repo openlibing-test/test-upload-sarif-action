@@ -55,7 +55,6 @@ stages:
             with:
               sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
               source_path: src
-              category: "pre-commit-report"
 
       ut-coverage:
         name: UT 覆盖率
