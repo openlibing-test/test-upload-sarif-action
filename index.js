@@ -65,7 +65,7 @@ function getInput(name) {
 function setOutput(key, value) {
   const stepOutput = process.env.STEP_OUTPUT;
   if (!stepOutput) {
-    console.log(`[WARN] STEP_OUTPUT env not set, skip output: ${sanitizeLogValue(key)}=${sanitizeLogValue(value)}`);
+    console.log(`[WARN] STEP_OUTPUT env not set, skip output: ${key}=${value}`);
     return;
   }
   let filePath;
@@ -75,13 +75,13 @@ function setOutput(key, value) {
     // 文件不存在但父目录有效时按文件路径追加（appendFileSync 自动创建）
     const parentDir = path.dirname(stepOutput);
     if (!(fs.existsSync(parentDir) && fs.statSync(parentDir).isDirectory())) {
-      console.log(`[WARN] STEP_OUTPUT path is invalid, skip output: ${sanitizeLogValue(key)}=${sanitizeLogValue(value)}`);
+      console.log(`[WARN] STEP_OUTPUT path is invalid, skip output: ${key}=${value}`);
       return;
     }
     filePath = stepOutput;
   }
   fs.appendFileSync(filePath, `${key}=${value}\n`, 'utf-8');
-  console.log(`[OUTPUT] ${sanitizeLogValue(key)}=${sanitizeLogValue(value)}`);
+  console.log(`[OUTPUT] ${key}=${value}`);
 }
 
 /**
@@ -112,7 +112,7 @@ function withRetrySync(fn, { retries = 3, label = '' } = {}) {
       lastErr = err;
       if (attempt === retries) break;
       const delaySec = Math.pow(2, attempt - 1);
-      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${sanitizeLogValue(err.message)}），${delaySec}s 后重试（${attempt + 1}/${retries}）`);
+      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delaySec}s 后重试（${attempt + 1}/${retries}）`);
       execSync(`sleep ${delaySec}`, { shell: '/bin/bash' });
     }
   }
@@ -132,36 +132,64 @@ async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
       lastErr = err;
       if (attempt === retries) break;
       const delayMs = Math.pow(2, attempt - 1) * 1000;
-      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${sanitizeLogValue(err.message)}），${delayMs}ms 后重试（${attempt + 1}/${retries}）`);
+      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delayMs}ms 后重试（${attempt + 1}/${retries}）`);
       await new Promise(r => setTimeout(r, delayMs));
     }
   }
   throw lastErr;
 }
 
-/** 日志清洗（Ref #31）：剔除 \r\n 与不可见控制字符，
- * 防止外部可控内容（输入路径、task_url、报告 warnings、服务端响应）注入伪造日志行。
- * 正常单行内容经清洗后保持不变。 */
+// ---------- 日志注入防护（Ref #31） ----------
+
+/** 剔除 \r\n 与不可见控制字符，防止外部可控内容（输入路径、task_url、报告 warnings、
+ * 服务端响应体）拼进日志时伪造日志行。正常单行内容清洗后保持不变。 */
 function sanitizeLogValue(value) {
   // eslint-disable-next-line no-control-regex
   return String(value).replace(/[\r\n\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
 }
 
-/** 日志脱敏：先清洗控制字符，再将 IP 地址替换为占位符 */
+// 统一在 console 出口清洗，覆盖本仓全部日志点与依赖库日志，避免逐个调用点遗漏
+['log', 'warn', 'error'].forEach((level) => {
+  const raw = console[level].bind(console);
+  console[level] = (...args) => raw(...args.map((a) => (typeof a === 'string' ? sanitizeLogValue(a) : a)));
+});
+
+/** 日志脱敏：IP 地址替换为占位符 */
 function sanitizePath(pathStr) {
-  return sanitizeLogValue(pathStr).replace(/(\d+\.\d+\.\d+\.\d+)/g, '[IP_ADDRESS]');
+  return pathStr.replace(/(\d+\.\d+\.\d+\.\d+)/g, '[IP_ADDRESS]');
+}
+
+// ---------- 临时产物治理（Ref #27） ----------
+
+/** 清理本次运行生成的 SARIF 中间文件，避免共享 runner 上残留。
+ * 只删传入的文件；rmdir 非递归，目录非空（他人残留/并发任务）时失败并忽略，
+ * 不会误删其他任务的产物。清理失败不影响主流程结果。 */
+function cleanupConvertFiles(files, dir) {
+  for (const f of files) {
+    try {
+      fs.rmSync(f, { force: true });
+    } catch (e) {
+      // 清理失败不影响主流程结果
+    }
+  }
+  files.clear();
+  try {
+    fs.rmdirSync(dir);
+  } catch (e) {
+    // 目录非空或已被删除，忽略
+  }
 }
 
 function resolveRegion() {
   const fromInput = getInput('region');
   if (fromInput) {
-    console.log(`[INFO] 使用 region（input）: ${sanitizeLogValue(fromInput)}`);
+    console.log(`[INFO] 使用 region（input）: ${fromInput}`);
     return fromInput;
   }
   for (const name of REGION_ENV_CANDIDATES) {
     const val = process.env[name];
     if (val && val.trim()) {
-      console.log(`[INFO] 使用 region（环境变量 ${sanitizeLogValue(name)}）: ${sanitizeLogValue(val.trim())}`);
+      console.log(`[INFO] 使用 region（环境变量 ${name}）: ${val.trim()}`);
       return val.trim();
     }
   }
@@ -303,13 +331,13 @@ function convertReports(reportFiles, outDir) {
     // 检测到输出重名时明确报错退出，避免静默覆盖导致报告内容丢失。
     const outName = path.basename(outPath);
     if (seenNames.has(outName)) {
-      console.log(`[ERROR] 转换输出文件重名: ${sanitizeLogValue(outName)}（来源 ${sanitizeLogValue(reportFile)}），请检查 report_file 是否包含同名报告`);
+      console.log(`[ERROR] 转换输出文件重名: ${outName}（来源 ${reportFile}），请检查 report_file 是否包含同名报告`);
       setOutput('result', 'failed');
       process.exit(1);
     }
     seenNames.add(outName);
-    warnings.forEach((w) => console.log(`[WARN] ${sanitizeLogValue(path.basename(reportFile))}: ${sanitizeLogValue(w)}`));
-    console.log(`[OK] 转换完成: ${sanitizeLogValue(path.basename(reportFile))} -> ${sanitizeLogValue(path.basename(outPath))} (${issueCount} 条问题)`);
+    warnings.forEach((w) => console.log(`[WARN] ${path.basename(reportFile)}: ${w}`));
+    console.log(`[OK] 转换完成: ${path.basename(reportFile)} -> ${path.basename(outPath)} (${issueCount} 条问题)`);
     sarifFiles.push(outPath);
   }
   return sarifFiles;
@@ -365,9 +393,9 @@ function readTaskParams() {
       projectId = projectId || parsed.projectId;
       taskId = taskId || parsed.taskId;
       region = region || parsed.region;
-      console.log(`[INFO] 从 codeCheck_task_url 解析 project_id/task_id/region/jobId: ${sanitizeLogValue(parsed.projectId)} / ${sanitizeLogValue(parsed.taskId)} / ${sanitizeLogValue(parsed.region)} / ${sanitizeLogValue(parsed.jobId)}`);
+      console.log(`[INFO] 从 codeCheck_task_url 解析 project_id/task_id/region/jobId: ${parsed.projectId} / ${parsed.taskId} / ${parsed.region} / ${parsed.jobId}`);
     } else {
-      console.log(`[WARN] 无法从 codeCheck_task_url 解析参数: ${sanitizeLogValue(taskUrl)}`);
+      console.log(`[WARN] 无法从 codeCheck_task_url 解析参数: ${taskUrl}`);
     }
   }
   region = region || resolveRegion();
@@ -632,20 +660,20 @@ function enrichSarifFiles(sarifFiles, sourceRoots) {
       originalContent = fs.readFileSync(f, 'utf-8');
       sarifObj = JSON.parse(originalContent);
     } catch (e) {
-      console.log(`[WARN] 无法解析 SARIF: ${sanitizeLogValue(path.basename(f))}，跳过代码片段补齐`);
+      console.log(`[WARN] 无法解析 SARIF: ${path.basename(f)}，跳过代码片段补齐`);
       continue;
     }
     const n = enrichRegionSnippet(sarifObj, sourceRoots);
     if (n > 0) {
       fs.writeFileSync(f, JSON.stringify(sarifObj, null, 2), 'utf-8');
-      console.log(`[OK] ${sanitizeLogValue(path.basename(f))}: 已补充 ${n} 个 result 的代码上下文（snippet 对齐问题行 + contextRegion 窗口）`);
+      console.log(`[OK] ${path.basename(f)}: 已补充 ${n} 个 result 的代码上下文（snippet 对齐问题行 + contextRegion 窗口）`);
       continue;
     }
     // n=0 时区分原因：无 result / 已含完整上下文（幂等）/ 源码不可读
     const run = sarifObj.runs && sarifObj.runs[0];
     const results = (run && run.results) || [];
     if (results.length === 0) {
-      console.log(`[INFO] ${sanitizeLogValue(path.basename(f))}: 无 result，跳过代码上下文补齐`);
+      console.log(`[INFO] ${path.basename(f)}: 无 result，跳过代码上下文补齐`);
       continue;
     }
     const allHaveContext = results.every(r => {
@@ -661,9 +689,9 @@ function enrichSarifFiles(sarifFiles, sourceRoots) {
       );
     });
     if (allHaveContext) {
-      console.log(`[INFO] ${sanitizeLogValue(path.basename(f))}: 全部 result 已含 snippet 与 contextRegion，无需补充`);
+      console.log(`[INFO] ${path.basename(f)}: 全部 result 已含 snippet 与 contextRegion，无需补充`);
     } else {
-      console.log(`[INFO] ${sanitizeLogValue(path.basename(f))}: 源码不可读，无法补齐代码上下文（检查 source_path 与 SARIF uri 是否指向工作区内文件）`);
+      console.log(`[INFO] ${path.basename(f)}: 源码不可读，无法补齐代码上下文（检查 source_path 与 SARIF uri 是否指向工作区内文件）`);
     }
   }
 }
@@ -689,7 +717,7 @@ function collectSarifFiles(sarifFile, workspace) {
       continue;
     }
     if (fs.statSync(p).isDirectory()) {
-      console.log(`[INFO] 输入为目录: ${sanitizeLogValue(p)}，扫描其中所有 .sarif 文件`);
+      console.log(`[INFO] 输入为目录: ${p}，扫描其中所有 .sarif 文件`);
       const entries = fs.readdirSync(p);
       const found = [];
       for (const entry of entries) {
@@ -698,12 +726,12 @@ function collectSarifFiles(sarifFile, workspace) {
         }
       }
       if (found.length === 0) {
-        console.log(`[WARN] 目录中未找到 .sarif 文件: ${sanitizeLogValue(p)}`);
+        console.log(`[WARN] 目录中未找到 .sarif 文件: ${p}`);
       }
       sarifFiles.push(...found);
     } else {
       sarifFiles.push(p);
-      console.log(`[OK] SARIF 文件: ${sanitizeLogValue(p)}`);
+      console.log(`[OK] SARIF 文件: ${p}`);
     }
   }
   return { sarifFiles, missingPaths };
@@ -713,10 +741,10 @@ function collectSarifFiles(sarifFile, workspace) {
 function resolveRepoRoot(workspace) {
   const gitDir = findFirst([workspace, '-maxdepth', '3', '-name', '.git', '-type', 'd']);
   if (gitDir) {
-    console.log(`[INFO] 仓库根目录（git 根）: ${sanitizeLogValue(path.dirname(gitDir))}`);
+    console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
     return path.dirname(gitDir);
   }
-  console.log(`[INFO] 仓库根目录（兜底 workspace）: ${sanitizeLogValue(workspace)}`);
+  console.log(`[INFO] 仓库根目录（兜底 workspace）: ${workspace}`);
   return workspace;
 }
 
@@ -729,7 +757,7 @@ function normalizeSarifUriFiles(sarifFiles, repoRoot) {
     try {
       sarifObj = JSON.parse(fs.readFileSync(f, 'utf-8'));
     } catch (e) {
-      console.log(`[WARN] uri 归一化跳过（无法解析 SARIF）: ${sanitizeLogValue(path.basename(f))}`);
+      console.log(`[WARN] uri 归一化跳过（无法解析 SARIF）: ${path.basename(f)}`);
       continue;
     }
     const n = SarifUriNormalizer.normalizeSarifUris(sarifObj, repoRoot);
@@ -796,7 +824,7 @@ async function run() {
       throw new Error('换证结果缺少 AK/SK');
     }
   } catch (err) {
-    console.log(`[ERROR] OIDC 换证失败: ${sanitizeLogValue(err.message)}`);
+    console.log(`[ERROR] OIDC 换证失败: ${err.message}`);
     console.log('[INFO] 请确认 workflow 已声明 permissions: id-token: write');
     setOutput('result', 'failed');
     process.exit(1);
@@ -810,27 +838,9 @@ async function run() {
   const tmpDir = os.tmpdir();
   const convertOutDir = path.join(tmpDir, 'sarif-convert-output');
   fs.mkdirSync(convertOutDir, { recursive: true });
-  // 临时产物治理（Ref #27）：本插件在共享 runner 上生成的 SARIF 中间文件
-  // 处理完毕即清理，避免残留文件被后续任务或扫描器读取。
-  // 只删除本次运行创建的文件；rmdirSync 非递归，目录非空（他人残留/并发任务）
-  // 时自然失败并忽略，不会误删其他任务的产物。
+  // 临时产物治理（Ref #27）：退出时清理本次运行生成的 SARIF 中间文件
   const createdConvertFiles = new Set();
-  const cleanupConvertFiles = () => {
-    for (const f of createdConvertFiles) {
-      try {
-        fs.rmSync(f, { force: true });
-      } catch (e) {
-        // 清理失败不影响主流程结果
-      }
-    }
-    createdConvertFiles.clear();
-    try {
-      fs.rmdirSync(convertOutDir);
-    } catch (e) {
-      // 目录非空或已被删除，忽略
-    }
-  };
-  process.on('exit', cleanupConvertFiles);
+  process.on('exit', () => cleanupConvertFiles(createdConvertFiles, convertOutDir));
 
   console.log('\n===== [3] 收集并生成 SARIF =====');
   const workspace = process.env.WORKSPACE || process.cwd();
@@ -858,16 +868,16 @@ async function run() {
     try {
       const api = new CodeArtsCheckApi({ ak: codeartsAk, sk: codeartsSk, token: codeartsToken, region });
       const parsed = await api.fetchIssues({ projectId, taskId, taskName });
-      parsed.warnings.forEach((w) => console.log(`[WARN] ${sanitizeLogValue(w)}`));
+      parsed.warnings.forEach((w) => console.log(`[WARN] ${w}`));
       const sarif = SarifGenerator.generate(parsed);
       const outName = `${parsed.task.taskName || 'codearts-check'}.sarif`;
       const outPath = path.join(convertOutDir, outName);
       fs.writeFileSync(outPath, JSON.stringify(sarif, null, 2), 'utf-8');
       createdConvertFiles.add(outPath);
       sarifFiles.push(outPath);
-      console.log(`[OK] 转换完成(CodeArts API): ${sanitizeLogValue(outName)} (${parsed.issues.length} 条问题)`);
+      console.log(`[OK] 转换完成(CodeArts API): ${outName} (${parsed.issues.length} 条问题)`);
     } catch (err) {
-      console.log(`[ERROR] CodeArts Check API 拉取失败: ${sanitizeLogValue(err.message)}`);
+      console.log(`[ERROR] CodeArts Check API 拉取失败: ${err.message}`);
       setOutput('result', 'failed');
       process.exit(1);
     }
@@ -881,7 +891,7 @@ async function run() {
   if (sarifFile) {
     const { sarifFiles: localFiles, missingPaths } = collectSarifFiles(sarifFile, workspace);
     if (missingPaths.length > 0) {
-      console.log(`[ERROR] SARIF 路径不存在: ${sanitizeLogValue(missingPaths.join(', '))}`);
+      console.log(`[ERROR] SARIF 路径不存在: ${missingPaths.join(', ')}`);
       setOutput('result', 'failed');
       process.exit(1);
     }
@@ -891,10 +901,10 @@ async function run() {
       try {
         const { sarif, issueCount, warnings } = SarifNormalizer.normalizeFile(f);
         fs.writeFileSync(f, JSON.stringify(sarif, null, 2), 'utf-8');
-        warnings.forEach((w) => console.log(`[WARN] ${sanitizeLogValue(path.basename(f))}: ${sanitizeLogValue(w)}`));
-        console.log(`[INFO] SARIF 规范化: ${sanitizeLogValue(path.basename(f))} (${issueCount} 条问题)`);
+        warnings.forEach((w) => console.log(`[WARN] ${path.basename(f)}: ${w}`));
+        console.log(`[INFO] SARIF 规范化: ${path.basename(f)} (${issueCount} 条问题)`);
       } catch (e) {
-        console.log(`[WARN] SARIF 规范化跳过（无法解析或缺少 runs/tool.driver）: ${sanitizeLogValue(path.basename(f))}: ${sanitizeLogValue(e.message)}`);
+        console.log(`[WARN] SARIF 规范化跳过（无法解析或缺少 runs/tool.driver）: ${path.basename(f)}: ${e.message}`);
       }
     }
     sarifFiles.push(...localFiles);
@@ -907,7 +917,7 @@ async function run() {
   }
 
   console.log(`[OK] 共收集 ${sarifFiles.length} 个 SARIF 文件:`);
-  sarifFiles.forEach(f => console.log(`  - ${sanitizeLogValue(path.basename(f))}`));
+  sarifFiles.forEach(f => console.log(`  - ${path.basename(f)}`));
 
   console.log('\n===== [3.5] SARIF uri 归一化（机器绝对路径 -> 相对仓库根） =====');
   // 部分工具（如 spotbugs）输出 runner 机器绝对路径，部分输出相对路径；统一剥离仓库根前缀，
@@ -927,7 +937,7 @@ async function run() {
   }
   // 始终兜底：ATOMGIT_WORKSPACE 下按文件名查找
   sourceRoots.push(workspace);
-  console.log(`[INFO] 源码根目录: ${sanitizeLogValue(sourceRoots.join(', '))}`);
+  console.log(`[INFO] 源码根目录: ${sourceRoots.join(', ')}`);
   enrichSarifFiles(sarifFiles, sourceRoots);
 
   console.log('\n===== [5] 构建 OBS 路径 =====');
@@ -949,7 +959,7 @@ async function run() {
       downloadUrl: `${OBS_READ_ENDPOINT}/${keyPrefix}/${name}`
     };
   });
-  sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${sanitizeLogValue(OBS_BUCKET)}/${sanitizeLogValue(u.keyPrefix)}/${sanitizeLogValue(u.name)}`));
+  sarifUploads.forEach(u => console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${u.keyPrefix}/${u.name}`));
 
   console.log('\n===== [6] 上传到 OBS（esdk-obs-nodejs + 失败指数退避重试，默认 3 次） =====');
   // 回调需要的 SARIF 下载 URL 列表（后端 SarifParseServiceImpl 直接按该列表解析，无需 build-result.json）
@@ -985,7 +995,7 @@ async function run() {
 
   for (let i = 0; i < sarifUploads.length; i++) {
     const u = sarifUploads[i];
-    console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${sanitizeLogValue(u.name)}`);
+    console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
     try {
       // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
       await withRetryAsync(() => client.putObject({
@@ -995,7 +1005,7 @@ async function run() {
         ACL: 'public-read'
       }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
     } catch (e2) {
-      console.log(`[ERROR] ${sanitizeLogValue(u.name)} 上传失败: ${sanitizeLogValue(e2.message)}`);
+      console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
       setOutput('result', 'failed');
       process.exit(1);
     }
@@ -1025,11 +1035,11 @@ async function run() {
   try {
     const callbackResult = await withRetryAsync(() => sendCallbackOidc(callbackUrl, callbackPayload, cred), { label: 'APIG 回调' });
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
-    console.log(`[INFO] 回调响应: ${sanitizeLogValue(JSON.stringify(callbackResult))}`);
+    console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
     const resultViewUrl = isBetaEnv ? RESULT_VIEW_BASE_BETA : RESULT_VIEW_BASE;
     console.log(`查看上传结果解析: ${resultViewUrl}`);
   } catch (err) {
-    console.log(`[WARN] 回调通知发送失败: ${sanitizeLogValue(err.message)}`);
+    console.log(`[WARN] 回调通知发送失败: ${err.message}`);
     console.log('[INFO] SARIF 上传已成功，回调失败不影响最终结果');
   }
 
@@ -1054,7 +1064,9 @@ module.exports = {
   resolveSourceFile,
   withRetrySync,
   withRetryAsync,
-  buildToolPrefix
+  buildToolPrefix,
+  sanitizeLogValue,
+  cleanupConvertFiles
 };
 
 if (require.main === module) {
