@@ -1,6 +1,6 @@
 {
   "name": "openlibing-upload-sarif",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "将任意工具产出的 SARIF 扫描结果上传到 OpenLibing（OIDC 认证）",
   "main": "index.js",
   "scripts": {

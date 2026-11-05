@@ -42,11 +42,15 @@ const ENDPOINTS = require('./src/config/endpoints');
 const OIDC_PROD_BASE = process.env.OIDC_PROD_BASE || ENDPOINTS.OIDC_PROD_BASE;
 const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 
-// OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
+// OBS：通用 SARIF 结果统一存放（后端经平台 OBS 凭证读取，对象私有化口径）
 // 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
 const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
 const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
+// 对象 ACL 固定 private（私有化安全硬约束，不开放配置）：SARIF 为仓库安全弱点
+// 地图（规则 ID/文件路径/代码片段），公开读即泄露安全底牌；后端已切换平台凭证
+// 下载，匿名可读不再依赖，公开读写法已于 v1.1.0 移除
+const OBJECT_ACL = 'private';
 // 结果解析查看页（回调成功后的提示链接），集中配置 + 环境变量覆盖（与上面同模式）
 const RESULT_VIEW_BASE = process.env.RESULT_VIEW_BASE || ENDPOINTS.RESULT_VIEW_BASE;
 const RESULT_VIEW_BASE_BETA = process.env.RESULT_VIEW_BASE_BETA || ENDPOINTS.RESULT_VIEW_BASE_BETA;
@@ -956,12 +960,13 @@ async function run() {
     const u = sarifUploads[i];
     console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
     try {
-      // ACL: 'public-read'：后端 SarifParseServiceImpl 通过匿名 HTTP GET 下载，对象必须公共读
+      // ACL 固定 private（私有化口径不可配置）：后端经平台 OBS 凭证读取，
+      // 不再依赖匿名可读；公开读写法已于 v1.1.0 移除
       await withRetryAsync(() => client.putObject({
         Bucket: OBS_BUCKET,
         Key: `${u.keyPrefix}/${u.name}`,
         SourceFile: u.file,
-        ACL: 'public-read'
+        ACL: OBJECT_ACL
       }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
     } catch (e2) {
       console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
