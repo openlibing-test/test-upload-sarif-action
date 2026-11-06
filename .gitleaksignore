@@ -1,0 +1,11 @@
+# gitleaks 历史指纹白名单
+# 格式：<commit>:<file>:<rule-id>:<line>
+#
+# 背景（见 sky140/upload-sarif-action#1）：
+# - 命中项为已删除的测试配置 test.yaml 中的历史测试凭据，仅残留在初始提交 6d8ef41 及
+#   其合并链提交 c215f65 的历史树中；当前所有分支 / tag / MR 引用的工作树均不含该文件。
+# - 该凭据指向个人测试仓 lcq_test/test-repo，已由归属方作废，不重写 git 历史
+#   （GitCode 服务端 keep-around / merge-requests 引用会保留旧对象，重写无法清除）。
+# - 仅屏蔽该条历史指纹，不影响对新增代码的扫描。
+6d8ef4126eb533ef9f6bf4341f634087cb12871e:test.yaml:generic-api-key:25
+c215f65fb5eee91f1854a85c335926270e460d49:test.yaml:generic-api-key:25
