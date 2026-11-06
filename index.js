@@ -960,14 +960,14 @@ async function run() {
     const u = sarifUploads[i];
     console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
     try {
-      // ACL 固定 private（私有化口径不可配置）：后端经平台 OBS 凭证读取，
-      // 不再依赖匿名可读；公开读写法已于 v1.1.0 移除
+      /* c8 ignore start -- OBS 上传依赖真实凭证与网络，属集成路径，单测不覆盖；ACL 语义见 OBJECT_ACL 常量 */
       await withRetryAsync(() => client.putObject({
         Bucket: OBS_BUCKET,
         Key: `${u.keyPrefix}/${u.name}`,
         SourceFile: u.file,
         ACL: OBJECT_ACL
       }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
+      /* c8 ignore stop */
     } catch (e2) {
       console.log(`[ERROR] ${u.name} 上传失败: ${e2.message}`);
       setOutput('result', 'failed');
