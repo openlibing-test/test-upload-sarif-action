@@ -18,10 +18,12 @@ repos:
       - id: detect-private-key # 检测私钥/敏感信息泄露
 
   # ===================== 敏感信息扫描 =====================
-  - repo: https://gitcode.com/GitHub_Trending/gi/gitleaks
-    rev: v8.30.1
+  - repo: https://gitcode.com/openlibing/pre-commit-hook-gitleaks.git
+    rev: v8.30.1.1
     hooks:
       - id: gitleaks
+        args: [dir, --redact, --config, .gitleaks.toml, --no-banner] # 接收 pre-commit 传入的文件清单：PR 走 --from-ref/--to-ref 增量，nightly 走 --all-files 全量
+        pass_filenames: true
 
   # 格式化
   # 运行前请先本地安装：npm install --save-dev --save-exact prettier@3.9.5
