@@ -47,10 +47,9 @@ const OIDC_BETA_BASE = process.env.OIDC_BETA_BASE || ENDPOINTS.OIDC_BETA_BASE;
 const OBS_KEY_ROOT = 'code-arts-check-results'; // buildToolPrefix 兜底前缀（工具名缺失时）
 const OBS_BUCKET = process.env.OBS_BUCKET || ENDPOINTS.OBS_BUCKET;
 const OBS_READ_ENDPOINT = process.env.OBS_READ_ENDPOINT || ENDPOINTS.OBS_READ_ENDPOINT;
-// 对象 ACL 固定 private（私有化安全硬约束，不开放配置）：SARIF 为仓库安全弱点
-// 地图（规则 ID/文件路径/代码片段），公开读即泄露安全底牌；后端已切换平台凭证
-// 下载，匿名可读不再依赖，公开读写法已于 v1.1.0 移除
-const OBJECT_ACL = 'private';
+// 对象私有（私有化安全硬约束）：不设置 ACL，依赖 OBS 对象默认私有，与
+// code-metrics-action 口径一致；SARIF 为仓库安全弱点地图（规则 ID/文件路径/
+// 代码片段），公开读即泄露安全底牌；后端已切换平台凭证下载，匿名可读不再依赖
 // 结果解析查看页（回调成功后的提示链接），集中配置 + 环境变量覆盖（与上面同模式）
 const RESULT_VIEW_BASE = process.env.RESULT_VIEW_BASE || ENDPOINTS.RESULT_VIEW_BASE;
 const RESULT_VIEW_BASE_BETA = process.env.RESULT_VIEW_BASE_BETA || ENDPOINTS.RESULT_VIEW_BASE_BETA;
@@ -960,12 +959,11 @@ async function run() {
     const u = sarifUploads[i];
     console.log(`[INFO] 上传 SARIF 文件 (${i + 1}/${sarifUploads.length}): ${u.name}`);
     try {
-      /* c8 ignore start -- OBS 上传依赖真实凭证与网络，属集成路径，单测不覆盖；ACL 语义见 OBJECT_ACL 常量 */
+      /* c8 ignore start -- OBS 上传依赖真实凭证与网络，属集成路径，单测不覆盖；对象私有，不设置 ACL */
       await withRetryAsync(() => client.putObject({
         Bucket: OBS_BUCKET,
         Key: `${u.keyPrefix}/${u.name}`,
-        SourceFile: u.file,
-        ACL: OBJECT_ACL
+        SourceFile: u.file
       }).then(r => assertUploadOk(r, u.name)), { label: `${u.name} 上传` });
       /* c8 ignore stop */
     } catch (e2) {
