@@ -1,0 +1,267 @@
+# =====================================================================
+# 组织级 gitleaks 自定义配置
+# 适用：本配置为组织各仓通用模板，随仓按需微调 allowlist 即可。
+# =====================================================================
+
+title = "openlibing gitleaks security rules"
+
+# 继承内置默认 222 条规则，仅在此基础上追加/放行
+[extend]
+useDefault = true
+
+# 全局 allowlist：排除已知误报路径（各仓按自身目录结构增删）
+[allowlist]
+description = "已知误报/无需扫描路径"
+paths = [
+    '''^\.idea/''',
+    '''^target/''',
+    '''(?:^|/)\.agents/''',
+    '''(^|/)node_modules(/|$)''',
+    '''(^|/)vendor(/|$)''',
+    '''(^|/)\.git/objects(/|$)''',
+    '''(^|/)__pycache__(/|$)''',
+    '''(^|/)site-packages(/|$)''',
+    '''(^|/)\.cache(/|$)''',
+    '''\.min\.js$''',
+    '''\.map$''',
+    '''\.lock$''',
+    '''\.exe$'''
+]
+
+# ---------------------------------------------------------------------
+# 规则 1：上下文赋值样式 —— gitcode / token 相关变量名后跟 token
+#   例：gitcode_access_token=<TOKEN>
+# ---------------------------------------------------------------------
+[[rules]]
+id = "gitcode-access-token-assignment"
+description = "GitCode classic personal access token in variable/config assignment"
+regex = '''(?i)\b(?:gitcode|git[_-]?code|gc)[_-]?(?:access[_-]?token|token|at|pat)\b\s*[:=]\s*["']?([a-zA-Z0-9_-]{20,40})["']?'''
+entropy = 3.5
+secretGroup = 1
+keywords = [
+    "gitcode_access_token",
+    "git_code_access_token",
+    "gc_access_token",
+    "gitcode_token",
+    "gitcode_at",
+    "git_code_token",
+    "gc_token",
+    "gcpat",
+    "gitcode_pat",
+]
+[[rules.allowlists]]
+description = "教程/文档占位符"
+regexes = [
+    '''your_[a-zA-Z0-9_-]+''',
+    '''example_[a-zA-Z0-9_-]+''',
+]
+
+# ---------------------------------------------------------------------
+# 规则 2：数据库/中间件连接串内嵌明文口令（mongodb://user:pass@）
+#   针对如 mongodb://rwuser:pass@host:port/db 这类生产连接串直接写死
+#   含明文口令的场景。限定协议避免 http(s) URL 中的 user:pass 误报；
+#   占位符（redis://:${REDIS_PASSWORD}@ 空 user、user:CHANGE_ME@、
+#   admin:password@ 等示例口令）通过 allowlist 放行，避免 README/
+#   docker-compose/测试夹具示例误报。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "db-uri-embedded-credential"
+description = "Database/middleware connection string with embedded userinfo credentials"
+regex = '''(?i)\b(?:mongodb(?:\+srv)?|mysql|postgres(?:ql)?|redis|mssql|jdbc:[a-z0-9+.-]+)://([^:/@\s]+):([^/@\s]+)@'''
+entropy = 2.5
+secretGroup = 2
+keywords = ["://"]
+[[rules.allowlists]]
+description = "占位符/示例口令（password/CHANGE_ME/${ENV}/%s 等）放行"
+regexes = [
+    '''(?i)^(?:password|passwd|pwd|pass|root|admin|user|test|foo|bar|toor|changeme|change_me|your[_-]?password|\$\{[^}]*\}|%[a-z0-9_-]+)$''',
+]
+
+# ---------------------------------------------------------------------
+# 规则 3：Jasypt 加密配置值（ENC(密文)）
+#   openlibing 多仓使用 Jasypt/Nacos 配置加密，加密值若提交入仓，
+#   结合仓库内的解密密钥组件（part1 等）可被还原，构成真实风险。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "jasypt-encrypted-value"
+description = "Jasypt encrypted configuration value ENC(...)"
+regex = '''ENC\(([A-Za-z0-9+/=]{16,})\)'''
+entropy = 3.5
+keywords = ["enc("]
+
+# ---------------------------------------------------------------------
+# 规则 4：HTTP Basic 认证头（Authorization: Basic base64）
+#   HTTP 客户端配置/文档示例中常见，base64 可解码出明文账号口令。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "http-basic-auth-header"
+description = "HTTP Authorization Basic header with base64 credentials"
+regex = '''(?i)authorization\s*[:=]\s*["']?basic\s+([a-zA-Z0-9+/=]{10,})["']?'''
+entropy = 2.5
+keywords = ["authorization", "basic"]
+
+# ---------------------------------------------------------------------
+# 规则 5：Docker config.json auth 令牌
+#   本地 Docker 登录凭据（docker login 生成的 ~/.docker/config.json auth 字段）
+#   误入仓库是常见泄露路径。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "docker-config-auth"
+description = "Docker config.json auth token"
+regex = '''(?i)"auth"\s*:\s*"([a-zA-Z0-9+/]{20,}={0,2})"'''
+entropy = 3
+keywords = ["\"auth\""]
+
+# ---------------------------------------------------------------------
+# 规则 6-9：explicit 字段强脱敏 —— 密码/访问密钥/令牌赋值
+#   改自 sensitive-data-rules.yaml 的 explicit-*（原版用 lookbehind/
+#   lookahead，gitleaks 的 Go RE2 不支持），改为 word boundary + 值字符集
+#   + allowlist 过滤英文单词值。SecretGroup=2 取真实值作为 secret。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "explicit-password"
+description = "Explicit password field with real secret value"
+regex = '''(?i)\b(password|passwd|pwd)\b[\s'":=]{1,5}([^\s'",;()\[\]{}&`.]{3,40})'''
+entropy = 2.0
+secretGroup = 2
+keywords = ["password", "passwd", "pwd", "pass", "db_password"]
+[[rules.allowlists]]
+description = "值若是单词/占位符/字段名自身/方法调用则放过"
+regexes = [
+    '''^(?:password|passwd|pwd|pass|with|value|is|foo|test|null|undefined|empty|none|example|placeholder|admin)$''',
+    '''^%.*s.*$''',
+    '''^[a-z][a-z0-9_]{2,}$''',
+    '''^(?:Optional|Provided|Required|Callable|Any|None|bool|str|int|true|false|True|False|File|Path|TYPE|status|policy|user|db|host|port|key|sk)$''',
+]
+
+[[rules]]
+id = "explicit-access-key"
+description = "Explicit access/secret key field (full names)"
+regex = '''(?i)\b(secret[_\s-]?access[_\s-]?key|access[_\s-]?key|secret[_\s-]?key)\b[\s'":=]{1,5}([a-zA-Z0-9+/=_-]{6,})'''
+entropy = 2.0
+secretGroup = 2
+keywords = ["access_key", "access key", "access-key", "accesskey", "ACCESS KEY", "secret_key", "secret key", "secret-key", "secretkey", "SECRET KEY", "accessToken", "secretAccessKey"]
+[[rules.allowlists]]
+description = "纯英文单词 / 连字符小写词 / XML 属性名（jdbcType= 等）为文档/示例"
+regexes = [
+    '''^[a-zA-Z]{3,20}$''',
+    '''^[a-z][a-z0-9-]{2,30}$''',
+    '''^[a-zA-Z]+[a-zA-Z0-9]*=$''',
+]
+
+[[rules]]
+id = "explicit-access-key-short"
+description = "Short ak/sk only when '=' ':' quote binds directly, entropy>=3 rejects word-like var names"
+regex = '''(?i)\b(ak|sk)(?:\s*[:=]\s*|["'])([a-zA-Z0-9+/=_-]{6,})'''
+entropy = 3.0
+secretGroup = 2
+keywords = ["ak", "sk"]
+
+[[rules]]
+id = "explicit-token"
+description = "Explicit access/auth token / api key field"
+regex = '''(?i)\b(access[_\s-]?token|auth[_\s-]?token|api[_\s-]?key)\b[\s'":=]{1,5}([a-zA-Z0-9+/=_-]{6,})'''
+entropy = 2.0
+secretGroup = 2
+keywords = ["access_token", "auth_token", "api_key"]
+[[rules.allowlists]]
+description = "纯英文单词 / XML 属性 / 方法调用返回值（SecurityUtil.decrypt 等）放过"
+regexes = [
+    '''^[a-zA-Z]{3,30}$''',
+    '''^[A-Z][a-zA-Z0-9+/=_-]{2,}$''',
+    '''^[a-zA-Z]+[a-zA-Z0-9]*=$''',
+]
+
+# ---------------------------------------------------------------------
+# 规则 10：通用 API Key 赋值（api_key=/apikey: 后跟 ≥32 位字母数字）
+#   通用兜底，覆盖未绑定厂商前缀的 API key 形态；熵 3.5 过滤低随机值。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "api_key"
+description = "Detects API key patterns"
+regex = '''(?i)api[_-]?key\s*[=:]\s*[a-zA-Z0-9]{32,}'''
+entropy = 3.5
+keywords = ["api_key", "apikey"]
+
+# ---------------------------------------------------------------------
+# 规则 11：华为云 AK（huawei/hwcloud/obs 上下文 + ak/access key + 值）
+#   覆盖华为云 OBS/对象存储场景的 Access Key 显式赋值；
+#   值限定大写开头 16~32 位以贴合华为 AK 形态，降低误报。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "huawei-cloud-ak"
+description = "Huawei Cloud Access Key heuristic"
+regex = '''(?i)(huawei|hwcloud|obs)[_-]?(ak|access[_-]?key)\s*[=:]\s*['"]?[A-Z0-9]{16,32}['"]?'''
+entropy = 3.5
+keywords = ["huawei","hwcloud","obs"]
+
+# ---------------------------------------------------------------------
+# 规则 12：阿里云 AccessKey（LTAI 前缀）
+#   阿里云 AK ID 标准前缀 LTAI + 12~30 位字母数字，默认规则已有
+#   alibaba-access-key-id 但仅匹配严格 AAC 长度；此处以 LTAI 前缀兜底。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "aliyun-ak"
+description = "Aliyun / Alibaba Cloud Access Key"
+regex = '''\bLTAI[0-9A-Za-z]{12,30}\b'''
+keywords = ["LTAI"]
+
+# ---------------------------------------------------------------------
+# 规则 13：腾讯云 SecretId（AKID 前缀）
+#   腾讯云 SecretId 标准前缀 AKID + 13~40 位字母数字。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "tencent-secret-id"
+description = "Tencent Cloud Secret ID"
+regex = '''\bAKID[0-9A-Za-z]{13,40}\b'''
+keywords = ["AKID"]
+
+# ---------------------------------------------------------------------
+# 规则 14：中国手机号（上下文关键词）
+#   改自 sensitive-data-rules.yaml chinese-phone；RE2 无回溯，去掉
+#   任意词介入改为"关键词 + 可选分隔符 + 可选+86/空格 + 11位手机号"。
+#   secretGroup=1 取手机号本体。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "chinese-phone"
+description = "China mobile number with a phone-ish keyword"
+regex = '''(?i)\b(?:phone|mobile|tel(?:ephone)?|contact|cell)\s*[:=]?\s*(?:[a-z]+[\s=:"'`]*)*[+]?(?:86[- ]?)?(1[3-9]\d{9})\b'''
+secretGroup = 1
+keywords = ["phone", "mobile", "tel", "telephone", "contact", "cell"]
+
+# ---------------------------------------------------------------------
+# 规则 15：中国手机号（中文语境 联系电话/手机号/电话）
+#   独立规则覆盖中文关键词场景（RE2 下与英文关键词分开更稳）。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "chinese-phone-cn"
+description = "China mobile number after Chinese keyword"
+regex = '''(?:联系电话|手机号?|电话号码|联系号码|电话)\s*[:：]?\s*[+]?(?:86[- ]?)?(1[3-9]\d{9})\b'''
+secretGroup = 1
+keywords = ["联系电话", "手机号", "电话号码", "联系号码", "电话"]
+
+# ---------------------------------------------------------------------
+# 规则 16：邮箱地址（PII）
+#   改自 sensitive-data-rules.yaml email；原版 lookbehind 改写为前置
+#   段。example.* 示例域与 noreply@工具方已 allowlist，降低文档误报。
+# ---------------------------------------------------------------------
+[[rules]]
+id = "email-address"
+description = "Email address (PII)"
+regex = '''[a-zA-Z0-9._%+-]{2,}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'''
+keywords = ["@"]
+[[rules.allowlists]]
+description = "示例域、工具占位邮箱、测试邮箱、SSH 形式、组织公共邮箱"
+regexes = [
+  '''@example\.(?:com|org|net|cn|test)$''',
+  '''noreply@[a-z0-9.-]+\.(?:ai|com|io)$''',
+  '''@tool-provider\.com$''',
+  '''(?:^|@)test@[a-z0-9.-]+\.(?:com|org|net)$''',
+  '''@test\.(?:com|org|net|edu)$''',
+  '''^admin@[a-z0-9.-]+\.(?:com|org|net)$''',
+  '''^alert@[a-z0-9.-]+\.(?:com|org|net)$''',
+  '''^git@[a-z0-9.-]+\.(?:com|cn|org|net)$''',
+  '''^secret@[a-z0-9.-]+\.(?:com|cn|org|net)$''',
+  '''(?:contact|pre-commit|support|TARGET_LOGIN)@openlibing\.com$''',
+  '''^glpat-xxx@[a-z0-9.-]+\.[a-z]+$''',
+]
