@@ -466,7 +466,7 @@ function maskLiteralBody(body) {
 
 /**
  * 凭证类规则 snippet 掩码（Ref issues #11/#12）：命中"硬编码口令/密钥"类规则时，
- * 问题行源码原文（如 String password = "123456"）本身就是明文凭证，随 SARIF
+ * 问题行源码原文（如 String password = "<明文口令>"）本身就是明文凭证，随 SARIF
  * 上传 OBS 后形成多副本长期留存。此处对 snippet 按行处理，行内引号包裹的
  * 非空字符串字面量替换为保留前 2 后 2 + *** 的掩码形态。
  * 注意：掩码后 snippet 与源码不再逐字一致，前端内容匹配高亮对凭证类检出
@@ -869,7 +869,7 @@ async function run() {
     console.log('[INFO] 数据源: CodeArts Check API（不读取本地报告文件）');
     apiConsumed = true;
     try {
-      const api = new CodeArtsCheckApi({ ak: codeartsAk, sk: codeartsSk, token: codeartsToken, region });
+      const api = new CodeArtsCheckApi({ ak: codeartsAk, sk: codeartsSk, token: codeartsToken, region }); // gitleaks:allow ak/sk 为入参变量引用，非硬编码凭证
       const parsed = await api.fetchIssues({ projectId, taskId, taskName });
       parsed.warnings.forEach((w) => console.log(`[WARN] ${w}`));
       const sarif = SarifGenerator.generate(parsed);
