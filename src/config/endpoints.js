@@ -15,8 +15,12 @@ module.exports = {
 
   // OBS：通用 SARIF 结果统一存放（后端 SarifParseServiceImpl 匿名 HTTP GET 下载）
   // 上传端点 server 由 OIDC SDK configure 动态返回 region，不在此写死
+  // 桶/读端点按平台隔离：GitCode 与 GitHub Actions 使用独立桶，
+  // 可分别用 OBS_BUCKET / OBS_BUCKET_GITHUB 与 OBS_READ_ENDPOINT 环境变量覆盖
   OBS_BUCKET: 'openlibing-gitcode-action',
+  OBS_BUCKET_GITHUB: 'openlibing-github-action',
   OBS_READ_ENDPOINT: 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com',
+  OBS_READ_ENDPOINT_GITHUB: 'https://openlibing-github-action.obs.cn-southwest-2.myhuaweicloud.com',
 
   // CodeArts Check API host（按 region 动态拼：{HOST_PREFIX}.{region}.{API_DOMAIN}）
   CODEARTS_HOST_PREFIX: 'codecheck-ext',

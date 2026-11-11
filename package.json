@@ -12,7 +12,7 @@
   "author": "test-devops",
   "license": "ISC",
   "dependencies": {
-    "@openlibing/huaweicloud-oidc-client": "0.0.5",
+    "@openlibing/huaweicloud-oidc-client": "0.0.7",
     "esdk-obs-nodejs": "^3.26.2"
   },
   "devDependencies": {

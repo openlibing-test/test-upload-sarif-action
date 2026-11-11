@@ -142,5 +142,5 @@ outputs:
     description: "上传结果：success 或 failed"
 
 runs:
-  using: "node16"
+  using: "node24"
   main: "dist/index.js"
