@@ -149,9 +149,45 @@ async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
   throw lastErr;
 }
 
+// ---------- 日志注入防护（Ref #31） ----------
+
+/** 剔除 \r\n 与不可见控制字符，防止外部可控内容（输入路径、task_url、报告 warnings、
+ * 服务端响应体）拼进日志时伪造日志行。正常单行内容清洗后保持不变。 */
+function sanitizeLogValue(value) {
+  // eslint-disable-next-line no-control-regex
+  return String(value).replace(/[\r\n\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+}
+
+// 统一在 console 出口清洗，覆盖本仓全部日志点与依赖库日志，避免逐个调用点遗漏
+['log', 'warn', 'error'].forEach((level) => {
+  const raw = console[level].bind(console);
+  console[level] = (...args) => raw(...args.map((a) => (typeof a === 'string' ? sanitizeLogValue(a) : a)));
+});
+
 /** 日志脱敏：IP 地址替换为占位符 */
 function sanitizePath(pathStr) {
   return pathStr.replace(/(\d+\.\d+\.\d+\.\d+)/g, '[IP_ADDRESS]');
+}
+
+// ---------- 临时产物治理（Ref #27） ----------
+
+/** 清理本次运行生成的 SARIF 中间文件，避免共享 runner 上残留。
+ * 只删传入的文件；rmdir 非递归，目录非空（他人残留/并发任务）时失败并忽略，
+ * 不会误删其他任务的产物。清理失败不影响主流程结果。 */
+function cleanupConvertFiles(files, dir) {
+  for (const f of files) {
+    try {
+      fs.rmSync(f, { force: true });
+    } catch (e) {
+      // 清理失败不影响主流程结果
+    }
+  }
+  files.clear();
+  try {
+    fs.rmdirSync(dir);
+  } catch (e) {
+    // 目录非空或已被删除，忽略
+  }
 }
 
 function resolveRegion() {
@@ -437,7 +473,7 @@ function maskLiteralBody(body) {
 
 /**
  * 凭证类规则 snippet 掩码（Ref issues #11/#12）：命中"硬编码口令/密钥"类规则时，
- * 问题行源码原文（如 String password = "123456"）本身就是明文凭证，随 SARIF
+ * 问题行源码原文（如 String password = "<明文口令>"）本身就是明文凭证，随 SARIF
  * 上传 OBS 后形成多副本长期留存。此处对 snippet 按行处理，行内引号包裹的
  * 非空字符串字面量替换为保留前 2 后 2 + *** 的掩码形态。
  * 注意：掩码后 snippet 与源码不再逐字一致，前端内容匹配高亮对凭证类检出
@@ -812,6 +848,9 @@ async function run() {
   const tmpDir = os.tmpdir();
   const convertOutDir = path.join(tmpDir, 'sarif-convert-output');
   fs.mkdirSync(convertOutDir, { recursive: true });
+  // 临时产物治理（Ref #27）：退出时清理本次运行生成的 SARIF 中间文件
+  const createdConvertFiles = new Set();
+  process.on('exit', () => cleanupConvertFiles(createdConvertFiles, convertOutDir));
 
   console.log('\n===== [3] 收集并生成 SARIF =====');
   const workspace = process.env.WORKSPACE || process.cwd();
@@ -824,6 +863,7 @@ async function run() {
     const nonEmptyFiles = resolved ? resolved.files.filter((f) => fs.statSync(f).size > 0) : [];
     if (nonEmptyFiles.length > 0) {
       const converted = convertReports(nonEmptyFiles, convertOutDir);
+      converted.forEach((f) => createdConvertFiles.add(f));
       sarifFiles.push(...converted);
       console.log(`[INFO] 数据源: 报告文件（${nonEmptyFiles.length} 个非空文件）`);
     } else {
@@ -836,13 +876,14 @@ async function run() {
     console.log('[INFO] 数据源: CodeArts Check API（不读取本地报告文件）');
     apiConsumed = true;
     try {
-      const api = new CodeArtsCheckApi({ ak: codeartsAk, sk: codeartsSk, token: codeartsToken, region });
+      const api = new CodeArtsCheckApi({ ak: codeartsAk, sk: codeartsSk, token: codeartsToken, region }); // gitleaks:allow ak/sk 为入参变量引用，非硬编码凭证
       const parsed = await api.fetchIssues({ projectId, taskId, taskName });
       parsed.warnings.forEach((w) => console.log(`[WARN] ${w}`));
       const sarif = SarifGenerator.generate(parsed);
       const outName = `${parsed.task.taskName || 'codearts-check'}.sarif`;
       const outPath = path.join(convertOutDir, outName);
       fs.writeFileSync(outPath, JSON.stringify(sarif, null, 2), 'utf-8');
+      createdConvertFiles.add(outPath);
       sarifFiles.push(outPath);
       console.log(`[OK] 转换完成(CodeArts API): ${outName} (${parsed.issues.length} 条问题)`);
     } catch (err) {
@@ -1033,7 +1074,9 @@ module.exports = {
   resolveSourceFile,
   withRetrySync,
   withRetryAsync,
-  buildToolPrefix
+  buildToolPrefix,
+  sanitizeLogValue,
+  cleanupConvertFiles
 };
 
 if (require.main === require.cache[eval('__filename')]) {
