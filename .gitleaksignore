@@ -9,3 +9,9 @@
 # - 仅屏蔽该条历史指纹，不影响对新增代码的扫描。
 6d8ef4126eb533ef9f6bf4341f634087cb12871e:test.yaml:generic-api-key:25
 c215f65fb5eee91f1854a85c335926270e460d49:test.yaml:generic-api-key:25
+
+# 日志脱敏测试输入夹具中的示例代码（String password = "..."），
+# 属"待脱敏原文"样例而非真实凭证；dir 模式指纹为 <file>:<rule-id>:<line>。
+test/fixtures/step_summary_80e9d9ec-928d-4965-9f16-feb8547b5a16.md:explicit-password:122
+test/fixtures/step_summary_80e9d9ec-928d-4965-9f16-feb8547b5a16.md:explicit-password:185
+test/fixtures/step_summary_80e9d9ec-928d-4965-9f16-feb8547b5a16.md:explicit-password:373
