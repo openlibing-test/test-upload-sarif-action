@@ -431,6 +431,45 @@ function resolveBranch() {
     : (process.env.ATOMGIT_REF_NAME || '');
 }
 
+/** 流水线上下文跨平台映射：GitHub Actions 用 GITHUB_*，GitCode 保持 ATOMGIT_* 原口径 */
+function resolvePlatformContext() {
+  if (IS_GITHUB) {
+    return {
+      pipelineRunId: process.env.GITHUB_RUN_ID || '',
+      pipelineId: process.env.GITHUB_JOB || '',
+      pipelineName: process.env.GITHUB_WORKFLOW || '',
+      commitId: process.env.GITHUB_SHA || ''
+    };
+  }
+  return {
+    pipelineRunId: process.env.ATOMGIT_RUN_ID || '',
+    pipelineId: process.env.ATOMGIT_PIPELINE_ID || '',
+    pipelineName: process.env.PIPELINE_NAME || '',
+    commitId: process.env.ATOMGIT_SHA || ''
+  };
+}
+
+/** 工作区根目录：GitCode 用 WORKSPACE，GitHub 用 GITHUB_WORKSPACE，最后兜底 cwd */
+function resolveWorkspace() {
+  return process.env.WORKSPACE || process.env.GITHUB_WORKSPACE || process.cwd();
+}
+
+/** OBS 路径中的仓库名：GitCode 取 ATOMGIT_REPOSITORY，GitHub 取 GITHUB_REPOSITORY，兜底 GIT_REPOSITORY */
+function resolveRepoBaseName() {
+  const repo = process.env.ATOMGIT_REPOSITORY || process.env.GITHUB_REPOSITORY || process.env.GIT_REPOSITORY || '';
+  return repo.split('/').pop() || 'unknown-repo';
+}
+
+/** 回调仓库地址：GitHub 用 GITHUB_SERVER_URL + GITHUB_REPOSITORY 拼装，GitCode 用 ATOMGIT_REPOSITORY_URL */
+function buildCallbackRepoUrl() {
+  if (IS_GITHUB) {
+    const repo = process.env.GITHUB_REPOSITORY || '';
+    if (!repo) return '';
+    return `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}`;
+  }
+  return process.env.ATOMGIT_REPOSITORY_URL || '';
+}
+
 /** 从 SARIF 文件提取工具名（runs[0].tool.driver.name），用于构建产物类型与 OBS 路径前缀；解析失败返回空 */
 function extractToolName(sarifFile) {
   try {
@@ -789,18 +828,12 @@ async function run() {
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const isBetaEnv = envType === 'beta';
   // 流水线上下文跨平台取值：GitHub Actions 用 GITHUB_*，GitCode 保持原有 ATOMGIT_* 口径
-  const workflowRunId = IS_GITHUB
-    ? (process.env.GITHUB_RUN_ID || '')
-    : (process.env.ATOMGIT_RUN_ID || '');
-  const pipelineId = IS_GITHUB
-    ? (process.env.GITHUB_JOB || '')
-    : (process.env.ATOMGIT_PIPELINE_ID || '');
-  const pipelineName = IS_GITHUB
-    ? (process.env.GITHUB_WORKFLOW || '')
-    : (process.env.PIPELINE_NAME || '');
-  const commitId = IS_GITHUB
-    ? (process.env.GITHUB_SHA || '')
-    : (process.env.ATOMGIT_SHA || '');
+  const {
+    pipelineRunId: workflowRunId,
+    pipelineId,
+    pipelineName,
+    commitId
+  } = resolvePlatformContext();
 
   // CodeArts Check API 凭证：优先 runner 注入的 IAM AK/SK（老方式），兜底 SDK 换取的 OIDC 临时凭证。
   // defects-detail 接口暂不支持 OIDC（STS + X-Security-Token）调用，老 AK/SK 是首选。
@@ -859,7 +892,7 @@ async function run() {
   fs.mkdirSync(convertOutDir, { recursive: true });
 
   console.log('\n===== [3] 收集并生成 SARIF =====');
-  const workspace = process.env.WORKSPACE || process.env.GITHUB_WORKSPACE || process.cwd();
+  const workspace = resolveWorkspace();
   const sarifFiles = [];
   let apiConsumed = false;
 
@@ -955,7 +988,7 @@ async function run() {
   enrichSarifFiles(sarifFiles, sourceRoots);
 
   console.log('\n===== [5] 构建 OBS 路径 =====');
-  const repoBaseName = (process.env.ATOMGIT_REPOSITORY || process.env.GITHUB_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
+  const repoBaseName = resolveRepoBaseName();
   const now = new Date();
   const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}`;
   // 统一路径结构：{工具名前缀}-results/{仓库名}/{yyyyMMdd}.{HH}/{runId|manual}/{文件名}
@@ -1034,11 +1067,7 @@ async function run() {
   const obsUrls = isSingleFile ? sarifDownloadUrls[0] : sarifDownloadUrls;
   const callbackPayload = {
     // GitHub 用 GITHUB_SERVER_URL + GITHUB_REPOSITORY 拼仓库地址，GitCode 保持 ATOMGIT_REPOSITORY_URL
-    repoUrl: IS_GITHUB
-      ? (process.env.GITHUB_REPOSITORY
-        ? `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}`
-        : '')
-      : (process.env.ATOMGIT_REPOSITORY_URL || ''),
+    repoUrl: buildCallbackRepoUrl(),
     pipelineId,
     pipelineName,
     pipelineRunId: workflowRunId || '',
@@ -1084,7 +1113,20 @@ module.exports = {
   resolveSourceFile,
   withRetrySync,
   withRetryAsync,
-  buildToolPrefix
+  buildToolPrefix,
+  // 平台适配相关（供单测覆盖双平台分支，不参与运行时契约）
+  IS_GITHUB,
+  SOURCE_CODE,
+  OBS_BUCKET,
+  OBS_READ_ENDPOINT,
+  getInput,
+  setOutput,
+  buildSourceRunUrl,
+  resolveBranch,
+  resolvePlatformContext,
+  resolveWorkspace,
+  resolveRepoBaseName,
+  buildCallbackRepoUrl
 };
 
 if (require.main === module) {
